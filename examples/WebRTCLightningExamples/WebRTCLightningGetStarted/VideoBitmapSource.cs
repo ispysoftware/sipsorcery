@@ -7,7 +7,7 @@
 // Aaron Clauson (aaron@sipsorcery.com)
 //
 // History:
-// 17 Feb 2025	Aaron Clauson	Created based on VideoTestPatternSource.
+// 26 Apr 2025	Aaron Clauson	Ported VideoBitmapSource to use fully managed ImageSharp library.
 //
 // License: 
 // BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
@@ -15,14 +15,13 @@
 
 using System;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using SIPSorceryMedia.Abstractions;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp;
 
 namespace SIPSorcery.Media;
 
@@ -161,15 +160,15 @@ public class VideoBitmapSource : IVideoSource, IDisposable
         return Task.CompletedTask;
     }
 
-    public void SetSourceBitmap(Bitmap bitmap)
+    public void SetSourceBitmap(Image<Rgba32> image)
     {
-        var bitmapWidth = bitmap.Width;
-        var bitmapHeight = bitmap.Height;
+        var bitmapWidth = image.Width;
+        var bitmapHeight = image.Height;
 
-        var i420Buffer = BitmapToI420(bitmap);
+        var i420Buffer = ImageToI420(image);
         var bgrBuffer = PixelConverter.I420toBGR(i420Buffer, bitmapWidth, bitmapHeight, out _);
 
-        lock(_sendTimer)
+        lock (_sendTimer)
         {
             _bitmapWidth = bitmapWidth;
             _bitmapHeight = bitmapHeight;
@@ -211,19 +210,13 @@ public class VideoBitmapSource : IVideoSource, IDisposable
         }
     }
 
-    private static byte[] BitmapToI420(Bitmap bitmap)
+    private static byte[] ImageToI420(Image<Rgba32> image)
     {
         try
         {
-            int width = bitmap.Width;
-            int height = bitmap.Height;
+            int width = image.Width;
+            int height = image.Height;
 
-            BitmapData bitmapData = bitmap.LockBits(
-                new Rectangle(0, 0, width, height),
-                ImageLockMode.ReadOnly,
-                PixelFormat.Format24bppRgb);
-
-            int rgbStride = bitmapData.Stride;
             int yStride = width;
             int uvStride = width / 2;
 
@@ -232,45 +225,46 @@ public class VideoBitmapSource : IVideoSource, IDisposable
 
             byte[] i420Buffer = new byte[ySize + 2 * uvSize]; // I420 layout: Y plane, then U plane, then V plane.
 
-            byte[] rgbBuffer = new byte[rgbStride * height];
-            Marshal.Copy(bitmapData.Scan0, rgbBuffer, 0, rgbBuffer.Length);
-            bitmap.UnlockBits(bitmapData);
-
-            int yIndex = 0;
-            int uIndex = ySize;         // U plane starts after Y plane
-            int vIndex = uIndex + uvSize; // V plane starts after U plane
-
-            for (int j = 0; j < height; j++)
+            image.ProcessPixelRows(accessor =>
             {
-                for (int i = 0; i < width; i++)
+                int yIndex = 0;
+                int uIndex = ySize;         // U plane starts after Y plane
+                int vIndex = uIndex + uvSize; // V plane starts after U plane
+
+                for (int j = 0; j < height; j++)
                 {
-                    int rgbIndex = j * rgbStride + (i * 3);
-                    byte b = rgbBuffer[rgbIndex];
-                    byte g = rgbBuffer[rgbIndex + 1];
-                    byte r = rgbBuffer[rgbIndex + 2];
+                    Span<Rgba32> pixelRow = accessor.GetRowSpan(j);
 
-                    // Convert RGB to YUV (BT.601 standard)
-                    byte y = (byte)((0.299 * r) + (0.587 * g) + (0.114 * b));
-                    byte u = (byte)((-0.168736 * r) + (-0.331264 * g) + (0.5 * b) + 128);
-                    byte v = (byte)((0.5 * r) + (-0.418688 * g) + (-0.081312 * b) + 128);
-
-                    // Write Y plane
-                    i420Buffer[yIndex++] = y;
-
-                    // Subsample U & V (4:2:0 means one U & V sample for every 2x2 block)
-                    if (j % 2 == 0 && i % 2 == 0)
+                    for (int i = 0; i < width; i++)
                     {
-                        i420Buffer[uIndex++] = u;
-                        i420Buffer[vIndex++] = v;
+                        Rgba32 pixel = pixelRow[i];
+                        byte r = pixel.R;
+                        byte g = pixel.G;
+                        byte b = pixel.B;
+
+                        // Convert RGB to YUV (BT.601 standard)
+                        byte y = (byte)((0.299 * r) + (0.587 * g) + (0.114 * b));
+                        byte u = (byte)((-0.168736 * r) + (-0.331264 * g) + (0.5 * b) + 128);
+                        byte v = (byte)((0.5 * r) + (-0.418688 * g) + (-0.081312 * b) + 128);
+
+                        // Write Y plane
+                        i420Buffer[yIndex++] = y;
+
+                        // Subsample U & V (4:2:0 means one U & V sample for every 2x2 block)
+                        if (j % 2 == 0 && i % 2 == 0)
+                        {
+                            i420Buffer[uIndex++] = u;
+                            i420Buffer[vIndex++] = v;
+                        }
                     }
                 }
-            }
+            });
 
             return i420Buffer;
         }
         catch (Exception)
         {
-            return [];
+            return Array.Empty<byte>();
         }
     }
 
