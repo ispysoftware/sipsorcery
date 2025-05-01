@@ -36,14 +36,14 @@ namespace SIPSorcery.Net
         /// Used to limit the number of packets that are sent at any one time, i.e. when 
         /// the transmit timer fires do not send more than this many packets.
         /// </summary>
-        public const int MAX_BURST = 4;
+        public const int MAX_BURST = 64;
 
         /// <summary>
         /// Milliseconds to wait between bursts if no SACK chunks are received in the interim.
         /// Eventually if no SACK chunks are received the congestion or receiver windows
         /// will reach zero and enforce a longer period.
         /// </summary>
-        public const int BURST_PERIOD_MILLISECONDS = 50;
+        public const int BURST_PERIOD_MILLISECONDS = 5;
 
         /// <summary>
         /// Retransmission timeout initial value.
@@ -182,6 +182,7 @@ namespace SIPSorcery.Net
 
             // RFC4960 7.2.1 (point 1)
             _congestionWindow = (uint)(Math.Min(4 * _defaultMTU, Math.Max(2 * _defaultMTU, CONGESTION_WINDOW_FACTOR)));
+            //_congestionWindow = (uint)(Math.Min(2 * _defaultMTU, Math.Max(2 * _defaultMTU, CONGESTION_WINDOW_FACTOR / 2)));
 
             // RFC4960 7.2.1 (point 3)
             _slowStartThreshold = _initialRemoteARwnd;
@@ -607,7 +608,7 @@ namespace SIPSorcery.Net
                         dataChunk.LastSentAt = DateTime.Now;
                         dataChunk.SendCount = 1;
 
-                        logger.LogTrace("SCTP resending missing data chunk for TSN {TSN}, data length {UserDataLength}, flags {ChunkFlags:X2}, send count {SendCount}.", dataChunk.TSN, dataChunk.UserData.Length, dataChunk.ChunkFlags, dataChunk.SendCount);
+                        logger.LogTrace("SCTP sending missing data chunk for TSN {TSN}, data length {UserDataLength}, flags {ChunkFlags:X2}, send count {SendCount}.", dataChunk.TSN, dataChunk.UserData.Length, dataChunk.ChunkFlags, dataChunk.SendCount);
 
                         _unconfirmedChunks.TryAdd(dataChunk.TSN, dataChunk);
                         _sendDataChunk(dataChunk);
