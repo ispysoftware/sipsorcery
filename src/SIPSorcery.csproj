@@ -9,26 +9,22 @@
   <ItemGroup>
     <None Remove="core\SIPEvents\Dialog\EventDialogSchema.xsd" />
     <None Remove="core\SIPEvents\Presence\PIDFSchema.xsd" />
-    <None Remove="media\Macroform_-_Simplicity.raw" />
-    <None Remove="media\testpattern.i420" />
-    <EmbeddedResource Include="media\Macroform_-_Simplicity.raw" />
-    <EmbeddedResource Include="media\testpattern.i420" />
     <None Include="icon.png" Pack="true" PackagePath="" />
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
     <PackageReference Include="Concentus" Version="2.2.2" />
-    <PackageReference Include="Portable.BouncyCastle" Version="1.9.0" />
     <PackageReference Include="DnsClient" Version="1.8.0" />
     <PackageReference Include="SIPSorcery.WebSocketSharp" Version="0.0.1" />
     <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.10" />
-    <PackageReference Include="System.Net.Security" Version="4.3.2" />
+    <PackageReference Include="Small" Version="0.0.2" />
     <PackageReference Include="System.Net.WebSockets.Client" Version="4.3.2" />
   </ItemGroup>
 
   <PropertyGroup>
     <TargetFrameworks>net9.0</TargetFrameworks>
-    <LangVersion>10.0</LangVersion>
+    <LangVersion>12.0</LangVersion>
     <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
     <NoWarn>$(NoWarn);SYSLIB0050</NoWarn>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -66,6 +62,7 @@
     <Version>8.0.13</Version>
     <AssemblyVersion>8.0.13</AssemblyVersion>
     <FileVersion>8.0.13</FileVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <PropertyGroup Label="SourceLink">

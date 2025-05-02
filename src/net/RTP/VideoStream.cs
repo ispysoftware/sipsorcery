@@ -20,8 +20,8 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.net.RTP;
 using SIPSorcery.net.RTP.Packetisation;
-using SIPSorcery.Net;
 using SIPSorcery.Sys;
 using SIPSorceryMedia.Abstractions;
 
@@ -179,7 +179,7 @@ namespace SIPSorcery.Net
                     int markerBit = (isLastNal && isFinalPacket) ? 1 : 0;
 
                     byte[] rtpHdr = is265 ? H265Packetiser.GetH265RtpHeader(naluHeader, isFirstPacket, isFinalPacket) : H264Packetiser.GetH264RtpHeader(naluHeader[0], isFirstPacket, isFinalPacket);
-                    
+
                     byte[] payload = new byte[payloadLength + rtpHdr.Length];
                     Buffer.BlockCopy(rtpHdr, 0, payload, 0, rtpHdr.Length);
                     Buffer.BlockCopy(nal, offset, payload, rtpHdr.Length, payloadLength);
@@ -200,7 +200,7 @@ namespace SIPSorcery.Net
 
         public void SendH265Frame(uint durationRtpUnits, int payloadID, byte[] sample)
         {
-            if(CheckIfCanSendRtpRaw())
+            if (CheckIfCanSendRtpRaw())
             {
                 var nals = H265Packetiser.ParseNals(sample);
                 var aggregatedNals = H265Packetiser.CreateAggregated(nals, RTPSession.RTP_MAX_PAYLOAD);

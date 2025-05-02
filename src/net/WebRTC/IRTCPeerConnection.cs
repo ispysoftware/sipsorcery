@@ -24,6 +24,8 @@ using System.Collections.Generic;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
+using Org.BouncyCastle.Tls;
+using Org.BouncyCastle.Tls.Crypto;
 using SIPSorcery.Sys;
 
 namespace SIPSorcery.Net
@@ -229,7 +231,7 @@ namespace SIPSorcery.Net
                 }
                 else
                 {
-                    return Certificate.NotAfter.ToUnixTime();
+                    return Certificate.NotAfter.GetEpoch();
                 }
             }
         }
@@ -238,7 +240,7 @@ namespace SIPSorcery.Net
 
         public List<RTCDtlsFingerprint> getFingerprints()
         {
-            return new List<RTCDtlsFingerprint> { DtlsUtils.Fingerprint(Certificate) };
+            return new List<RTCDtlsFingerprint> { DtlsUtils.Fingerprint(Org.BouncyCastle.Security.DotNetUtilities.FromX509Certificate(Certificate)) };
         }
     }
 
@@ -267,7 +269,7 @@ namespace SIPSorcery.Net
                 }
                 else
                 {
-                    return Certificate.NotAfter.ToUnixTime();
+                    return Certificate.NotAfter.GetEpoch();
                 }
             }
         }
@@ -294,10 +296,7 @@ namespace SIPSorcery.Net
         public RTCIceTransportPolicy iceTransportPolicy;
         public RTCBundlePolicy bundlePolicy;
         public RTCRtcpMuxPolicy rtcpMuxPolicy;
-#pragma warning disable CS0618 // Type or member is obsolete
-        public List<RTCCertificate> certificates;
-#pragma warning restore CS0618 // Type or member is obsolete
-        public List<RTCCertificate2> certificates2;
+        public List<SIPSorcery.Net.RTCCertificate2> certificates2;
 
         /// <summary>
         /// The Bouncy Castle DTLS logic enforces the use of Extended Master 

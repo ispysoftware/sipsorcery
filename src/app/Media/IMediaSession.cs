@@ -14,6 +14,7 @@
 //-----------------------------------------------------------------------------
 
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -41,11 +42,6 @@ namespace SIPSorcery.SIP.App
     public interface IMediaSession
     {
         /// <summary>
-        /// Indicates wheter the session supports real time text. 
-        /// </summary>
-        bool HasText { get; }
-
-        /// <summary>
         /// Indicates whether the session supports audio.
         /// </summary>
         bool HasAudio { get; }
@@ -54,6 +50,11 @@ namespace SIPSorcery.SIP.App
         /// Indicates whether the session supports video.
         /// </summary>
         bool HasVideo { get; }
+
+        /// <summary>
+        /// Indicates whether the session supports video.
+        /// </summary>
+        bool HasText { get; }
 
         /// <summary>
         /// Indicates whether the session has been closed.

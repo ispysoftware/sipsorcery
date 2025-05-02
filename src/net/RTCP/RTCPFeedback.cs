@@ -27,6 +27,7 @@
 //-----------------------------------------------------------------------------
 
 using System;
+using System.Buffers.Binary;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Sys;
 
@@ -48,6 +49,7 @@ namespace SIPSorcery.Net
         TLLEI = 7, 			// Transport-Layer Third-Party Loss Early Indication	[RFC6642]
         RTCP_ECN_FB = 8,	// RTCP ECN Feedback 									[RFC6679]
         PAUSE_RESUME = 9,   // Media Pause/Resume									[RFC7728]
+
         DBI = 10,			// Delay Budget Information (DBI) [3GPP TS 26.114 v16.3.0][Ozgur_Oyman]
         TWCC = 15,          // Transport-Wide Congestion Control                    [RFC8888]
         // 11-30			// Unassigned	
@@ -146,21 +148,13 @@ namespace SIPSorcery.Net
         /// Create a new RTCP Report from a serialised byte array.
         /// </summary>
         /// <param name="packet">The byte array holding the serialised feedback report.</param>
-        public RTCPFeedback(byte[] packet)
+        public RTCPFeedback(ReadOnlySpan<byte> packet)
         {
             Header = new RTCPHeader(packet);
 
             int payloadIndex = RTCPHeader.HEADER_BYTES_LENGTH;
-            if (BitConverter.IsLittleEndian)
-            {
-                SenderSSRC = NetConvert.DoReverseEndian(BitConverter.ToUInt32(packet, payloadIndex));
-                MediaSSRC = NetConvert.DoReverseEndian(BitConverter.ToUInt32(packet, payloadIndex + 4));
-            }
-            else
-            {
-                SenderSSRC = BitConverter.ToUInt32(packet, payloadIndex);
-                MediaSSRC = BitConverter.ToUInt32(packet, payloadIndex + 4);
-            }
+            SenderSSRC = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(payloadIndex));
+            MediaSSRC = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(payloadIndex + 4));
 
             switch (Header)
             {
@@ -170,16 +164,8 @@ namespace SIPSorcery.Net
                     break;
                 case var x when x.PacketType == RTCPReportTypesEnum.RTPFB:
                     SENDER_PAYLOAD_SIZE = 12;
-                    if (BitConverter.IsLittleEndian)
-                    {
-                        PID = NetConvert.DoReverseEndian(BitConverter.ToUInt16(packet, payloadIndex + 8));
-                        BLP = NetConvert.DoReverseEndian(BitConverter.ToUInt16(packet, payloadIndex + 10));
-                    }
-                    else
-                    {
-                        PID = BitConverter.ToUInt16(packet, payloadIndex + 8);
-                        BLP = BitConverter.ToUInt16(packet, payloadIndex + 10);
-                    }
+                    PID = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(payloadIndex + 8));
+                    BLP = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(payloadIndex + 10));
                     break;
 
                 case var x when x.PacketType == RTCPReportTypesEnum.PSFB && x.PayloadFeedbackMessageType == PSFBFeedbackTypesEnum.PLI:
@@ -202,7 +188,7 @@ namespace SIPSorcery.Net
                     SENDER_PAYLOAD_SIZE = 8 + 12; // 8 bytes from (SenderSSRC + MediaSSRC) + extra 12 bytes from REMB Definition
 
                     var currentCounter = payloadIndex + 8;
-                    UniqueID = System.Text.ASCIIEncoding.ASCII.GetString(packet, currentCounter, 4);
+                    UniqueID = packet.Slice(currentCounter, 4).ToString(System.Text.Encoding.ASCII);
                     currentCounter += 4;
 
                     if (string.Equals(UniqueID,"REMB", StringComparison.CurrentCultureIgnoreCase))
@@ -227,14 +213,7 @@ namespace SIPSorcery.Net
                         
                         currentCounter += 3;
 
-                        if (BitConverter.IsLittleEndian)
-                        {
-                            FeedbackSSRC = NetConvert.DoReverseEndian(BitConverter.ToUInt32(packet, currentCounter));
-                        }
-                        else
-                        {
-                            FeedbackSSRC = BitConverter.ToUInt32(packet, currentCounter);
-                        }
+                        FeedbackSSRC = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(currentCounter));
                     }
 
                     break;
@@ -357,7 +336,8 @@ namespace SIPSorcery.Net
 
                     break;
                 default:
-                    logger?.LogDebug("Serialization for feedback report {PacketType} and message type {FeedbackMessageType} not yet implemented.", Header.PacketType, Header.FeedbackMessageType);
+                    logger?.LogDebug($"Serialization for feedback report {Header.PacketType} and message type "
+                                        + $"{Header.FeedbackMessageType} not yet implemented.");
                     break;
                     //throw new NotImplementedException($"Serialisation for feedback report {Header.PacketType} and message type "
                     //+ $"{Header.FeedbackMessageType} not yet implemented.");

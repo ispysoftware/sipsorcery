@@ -37,6 +37,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Org.BouncyCastle.Bcpg;
 using SIPSorcery.Sys;
 
 namespace SIPSorcery.Net
@@ -155,8 +156,9 @@ namespace SIPSorcery.Net
         /// <summary>
         /// Parses a TWCC feedback packet from the given byte array.
         /// </summary>
-        public RTCPTWCCFeedback(byte[] packet)
+        public RTCPTWCCFeedback(ReadOnlySpan<byte> packetspan)
         {
+            byte[] packet = packetspan.ToArray(); //todo - clear this up
             ValidatePacket(packet);
 
             // Parse the RTCP header.

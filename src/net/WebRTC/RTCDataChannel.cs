@@ -16,6 +16,7 @@
 
 using System;
 using System.Text;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Sys;
 
@@ -88,8 +89,8 @@ namespace SIPSorcery.Net
         {
             _transport = transport;
 
-            if (init == null) {
-                ordered = true;
+            if (init == null)
+            {
                 return;
             }
             // TODO: Utilize ordered, maxPacketLifeTime, maxRetransmits, and protocol;
@@ -103,7 +104,7 @@ namespace SIPSorcery.Net
 
         internal void GotAck()
         {
-            logger.LogDebug("Data channel for label {label} now open.", label);
+            logger.LogDebug($"Data channel for label {label} now open.");
             IsOpened = true;
             readyState = RTCDataChannelState.open;
             onopen?.Invoke();
@@ -122,7 +123,7 @@ namespace SIPSorcery.Net
         {
             IsOpened = false;
             readyState = RTCDataChannelState.closed;
-            logger.LogDebug("Data channel with id {id} has been closed", id);
+            logger.LogDebug($"Data channel with id {id} has been closed");
             onclose?.Invoke();
         }
 
@@ -130,6 +131,7 @@ namespace SIPSorcery.Net
         /// Sends a string data payload on the data channel.
         /// </summary>
         /// <param name="message">The string message to send.</param>
+        /// <exception cref="InvalidOperationException">SCTP transport is not connected.</exception></exception>
         public void send(string message)
         {
             if (message != null && Encoding.UTF8.GetByteCount(message) > _transport.maxMessageSize)
@@ -139,7 +141,7 @@ namespace SIPSorcery.Net
             }
             else if (_transport.state != RTCSctpTransportState.Connected)
             {
-                logger.LogWarning("WebRTC data channel send failed due to SCTP transport in state {TransportState}.", _transport.state);
+                throw new InvalidOperationException("SCTP transport is not connected.");
             }
             else
             {
@@ -165,7 +167,8 @@ namespace SIPSorcery.Net
         /// Sends a binary data payload on the data channel.
         /// </summary>
         /// <param name="data">The data to send.</param>
-        public void send(byte[] data)
+        /// <exception cref="InvalidOperationException">SCTP transport is not connected.</exception></exception>
+        public void send(ReadOnlySpan<byte> data)
         {
             if (data.Length > _transport.maxMessageSize)
             {
@@ -174,13 +177,13 @@ namespace SIPSorcery.Net
             }
             else if (_transport.state != RTCSctpTransportState.Connected)
             {
-                logger.LogWarning("WebRTC data channel send failed due to SCTP transport in state {TransportState}.", _transport.state);
+                throw new InvalidOperationException("SCTP transport is not connected.");
             }
             else
             {
                 lock (this)
                 {
-                    if (data?.Length == 0)
+                    if (data.Length == 0)
                     {
                         _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(),
                             (uint)DataChannelPayloadProtocols.WebRTC_Binary_Empty,
@@ -211,7 +214,7 @@ namespace SIPSorcery.Net
             {
                 type += (byte)DataChannelTypes.DATA_CHANNEL_PARTIAL_RELIABLE_TIMED;
             }
-            else if(maxRetransmits > 0)
+            else if (maxRetransmits > 0)
             {
                 type += (byte)DataChannelTypes.DATA_CHANNEL_PARTIAL_RELIABLE_REXMIT;
             }
@@ -249,7 +252,7 @@ namespace SIPSorcery.Net
         /// <summary>
         /// Event handler for an SCTP data chunk being received for this data channel.
         /// </summary>
-        internal void GotData(ushort streamID, ushort streamSeqNum, uint ppID, byte[] data)
+        internal void GotData(ushort streamID, ushort streamSeqNum, uint ppID, ReadOnlySpan<byte> data)
         {
             //logger.LogTrace($"WebRTC data channel GotData stream ID {streamID}, stream seqnum {streamSeqNum}, ppid {ppID}, label {label}.");
 

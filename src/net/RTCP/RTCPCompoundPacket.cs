@@ -16,7 +16,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -62,7 +61,7 @@ namespace SIPSorcery.Net
         /// Creates a new RTCP compound packet from a serialised buffer.
         /// </summary>
         /// <param name="packet">The serialised RTCP compound packet to parse.</param>
-        public RTCPCompoundPacket(byte[] packet)
+        public RTCPCompoundPacket(ReadOnlySpan<byte> packet)
         {
             int offset = 0;
             while (offset < packet.Length)
@@ -74,7 +73,7 @@ namespace SIPSorcery.Net
                 }
                 else
                 {
-                    var buffer = packet.Skip(offset).ToArray();
+                    var buffer = packet.Slice(offset);
 
                     // The payload type field is the second byte in the RTCP header.
                     byte packetTypeID = buffer[1];
@@ -101,8 +100,10 @@ namespace SIPSorcery.Net
                             offset += byeLength;
                             break;
                         case (byte)RTCPReportTypesEnum.RTPFB:
+                            // TODO: Interpret Generic RTP feedback reports.
                             var typ = RTCPHeader.ParseFeedbackType(buffer);
-                            switch (typ) {
+                            switch (typ)
+                            {
                                 case RTCPFeedbackTypesEnum.TWCC:
                                     TWCCFeedback = new RTCPTWCCFeedback(buffer);
                                     int twccFeedbackLength = (TWCCFeedback.Header.Length + 1) * 4;
@@ -114,6 +115,8 @@ namespace SIPSorcery.Net
                                     offset += rtpfbFeedbackLength;
                                     break;
                             }
+                            //var rtpfbHeader = new RTCPHeader(buffer);
+                            //offset += rtpfbHeader.Length * 4 + 4;
                             break;
                         case (byte)RTCPReportTypesEnum.PSFB:
                             // TODO: Interpret Payload specific feedback reports.
@@ -124,8 +127,9 @@ namespace SIPSorcery.Net
                             //offset += psfbHeader.Length * 4 + 4;
                             break;
                         default:
+                            logger.LogWarning($"RTCPCompoundPacket did not recognise packet type ID {packetTypeID}.");
                             offset = Int32.MaxValue;
-                            logger.LogWarning("RTCPCompoundPacket did not recognise packet type ID {PacketTypeID}. {Packet}", packetTypeID, packet.HexStr());
+                            logger.LogWarning(packet.HexStr());
                             break;
                     }
                 }
@@ -292,8 +296,9 @@ namespace SIPSorcery.Net
                             //offset += psfbHeader.Length * 4 + 4;
                             break;
                         default:
+                            logger.LogWarning($"RTCPCompoundPacket did not recognise packet type ID {packetTypeID}.");
                             offset = Int32.MaxValue;
-                            logger.LogWarning("RTCPCompoundPacket did not recognise packet type ID {PacketTypeID}. {Packet}", packetTypeID, packet.HexStr());
+                            logger.LogWarning(packet.HexStr());
                             break;
                     }
                 }

@@ -41,9 +41,11 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Org.BouncyCastle.Crypto.Tls;
+using SIPSorcery.net.RTP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Sys;
+using Org.BouncyCastle.Tls;
+using Org.BouncyCastle.Tls.Crypto.Impl.BC;
 
 namespace SIPSorcery.Net
 {
@@ -180,9 +182,11 @@ namespace SIPSorcery.Net
         readonly RTCDataChannelCollection dataChannels;
         public IReadOnlyCollection<RTCDataChannel> DataChannels => dataChannels;
 
-        private Org.BouncyCastle.Crypto.Tls.Certificate _dtlsCertificate;
+        private Org.BouncyCastle.Tls.Certificate _dtlsCertificate;
         private Org.BouncyCastle.Crypto.AsymmetricKeyParameter _dtlsPrivateKey;
+        private BcTlsCrypto _crypto;
         private DtlsSrtpTransport _dtlsHandle;
+
         private Task _iceInitiateGatheringTask;
         private new TaskCompletionSource<bool> _iceCompletedGatheringTask = new();
 
@@ -262,8 +266,6 @@ namespace SIPSorcery.Net
         /// remote peer.
         /// </summary>
         public RTCDtlsFingerprint DtlsCertificateFingerprint { get; private set; }
-
-        public string DtlsCertificateSignatureAlgorithm { get; private set; } = string.Empty;
 
         /// <summary>
         /// The SCTP transport over which SCTP data is sent and received.
@@ -387,6 +389,7 @@ namespace SIPSorcery.Net
         public RTCPeerConnection(RTCConfiguration configuration, int bindPort = 0, PortRange portRange = null, Boolean videoAsPrimary = false) :
             base(true, true, true, configuration?.X_BindAddress, bindPort, portRange)
         {
+            _crypto = new BcTlsCrypto();
             dataChannels = new RTCDataChannelCollection(useEvenIds: () => _dtlsHandle.IsClient);
 
             if (_configuration != null &&
@@ -400,9 +403,9 @@ namespace SIPSorcery.Net
             {
                 _configuration = configuration;
 
-                if (!InitializeCertificates(configuration) && !InitializeCertificates2(configuration))
+                if (!InitializeCertificates2(configuration))
                 {
-                    logger.LogDebug("No DTLS certificate is provided in the configuration");
+                    logger.LogWarning("No DTLS certificate is provided in the configuration");
                 }
 
                 if (_configuration.X_UseRtpFeedbackProfile)
@@ -418,16 +421,10 @@ namespace SIPSorcery.Net
             if (_dtlsCertificate == null)
             {
                 // No certificate was provided so create a new self signed one.
-                (_dtlsCertificate, _dtlsPrivateKey) = DtlsUtils.CreateSelfSignedTlsCert(useRsa: configuration?.X_UseRsaForDtlsCertificate ?? false);
+                (_dtlsCertificate, _dtlsPrivateKey) = DtlsUtils.CreateSelfSignedTlsCert(_crypto);
             }
 
             DtlsCertificateFingerprint = DtlsUtils.Fingerprint(_dtlsCertificate);
-            DtlsCertificateSignatureAlgorithm = DtlsUtils.GetSignatureAlgorithm(_dtlsCertificate);
-
-            logger.LogDebug("RTCPeerConnection created with DTLS certificate with fingerprint {DtlsCertificateFingerprint} and signature algorithm {DtlsCertificateSignatureAlgorithm}.", DtlsCertificateFingerprint, DtlsCertificateSignatureAlgorithm);
-
-            // Save this log message to webrtc.pem and then to decode use: openssl x509 -in webrtc.pem -text -noout
-            logger.LogTrace("-----BEGIN CERTIFICATE-----\n{Certificate}\n-----END CERTIFICATE-----", DtlsUtils.ExportToDerBase64(_dtlsCertificate));
 
             SessionID = Guid.NewGuid().ToString();
             LocalSdpSessionID = Crypto.GetRandomInt(5).ToString();
@@ -461,56 +458,7 @@ namespace SIPSorcery.Net
             // This job was moved to a background thread as it was observed that interacting with the OS network
             // calls and/or initialising DNS was taking up to 600ms, see
             // https://github.com/sipsorcery-org/sipsorcery/issues/456.
-            _iceInitiateGatheringTask = Task.Run(_rtpIceChannel.StartGathering);
-        }
-
-        private bool InitializeCertificates(RTCConfiguration configuration)
-        {
-            if (configuration.certificates == null || configuration.certificates.Count == 0)
-            {
-                return false;
-            }
-
-            // Find the first certificate that has a usable private key.
-#pragma warning disable CS0618 // Type or member is obsolete
-            RTCCertificate usableCert = null;
-#pragma warning restore CS0618 // Type or member is obsolete
-            foreach (var cert in _configuration.certificates)
-            {
-                // Attempting to check that a certificate has an exportable private key.
-                // TODO: Does not seem to be a particularly reliable way of checking private key exportability.
-                if (cert.Certificate.HasPrivateKey)
-                {
-                    //if (cert.Certificate.PrivateKey is RSACryptoServiceProvider)
-                    //{
-                    //    var rsa = cert.Certificate.PrivateKey as RSACryptoServiceProvider;
-                    //    if (!rsa.CspKeyContainerInfo.Exportable)
-                    //    {
-                    //        logger.LogWarning($"RTCPeerConnection was passed a certificate for {cert.Certificate.FriendlyName} with a non-exportable RSA private key.");
-                    //    }
-                    //    else
-                    //    {
-                    //        usableCert = cert;
-                    //        break;
-                    //    }
-                    //}
-                    //else
-                    //{
-                    usableCert = cert;
-                    break;
-                    //}
-                }
-            }
-
-            if (usableCert == null)
-            {
-                throw new ApplicationException("RTCPeerConnection was not able to find a certificate from the input configuration list with a usable private key.");
-            }
-
-            _dtlsCertificate = DtlsUtils.LoadCertificateChain(usableCert.Certificate);
-            _dtlsPrivateKey = DtlsUtils.LoadPrivateKeyResource(usableCert.Certificate);
-
-            return true;
+           _iceInitiateGatheringTask = Task.Run(_rtpIceChannel.StartGathering);
         }
 
         private bool InitializeCertificates2(RTCConfiguration configuration)
@@ -520,7 +468,7 @@ namespace SIPSorcery.Net
                 return false;
             }
 
-            _dtlsCertificate = new Certificate(new[] { configuration.certificates2[0].Certificate.CertificateStructure });
+            _dtlsCertificate = new Certificate(new[] { new BcTlsCertificate(_crypto, configuration.certificates2[0].Certificate.CertificateStructure) });
             _dtlsPrivateKey = configuration.certificates2[0].PrivateKey;
 
             return true;
@@ -545,7 +493,7 @@ namespace SIPSorcery.Net
                         var connectedEP = _rtpIceChannel.NominatedEntry.RemoteCandidate.DestinationEndPoint;
 
                         SetGlobalDestination(connectedEP, connectedEP);
-                        logger.LogDebug("ICE changing connected remote end point to {connectedEP}.", connectedEP);
+                        logger.LogInformation($"ICE changing connected remote end point to {connectedEP}.");
                     }
 
                     if (connectionState == RTCPeerConnectionState.disconnected ||
@@ -564,26 +512,29 @@ namespace SIPSorcery.Net
                     var connectedEP = _rtpIceChannel.NominatedEntry.RemoteCandidate.DestinationEndPoint;
 
                     SetGlobalDestination(connectedEP, connectedEP);
-                    logger.LogDebug("ICE connected to remote end point {connectedEP}.", connectedEP);
+                    logger.LogInformation($"ICE connected to remote end point {connectedEP}.");
 
                     bool disableDtlsExtendedMasterSecret = _configuration != null && _configuration.X_DisableExtendedMasterSecretKey;
+
+
+
                     _dtlsHandle = new DtlsSrtpTransport(
                                 IceRole == IceRolesEnum.active ?
-                                new DtlsSrtpClient(_dtlsCertificate, _dtlsPrivateKey)
+                                new DtlsSrtpClient(_crypto, _dtlsCertificate, _dtlsPrivateKey)
                                 { ForceUseExtendedMasterSecret = !disableDtlsExtendedMasterSecret } :
-                                (IDtlsSrtpPeer)new DtlsSrtpServer(_dtlsCertificate, _dtlsPrivateKey)
+                                (IDtlsSrtpPeer)new DtlsSrtpServer(_crypto, _dtlsCertificate, _dtlsPrivateKey)
                                 { ForceUseExtendedMasterSecret = !disableDtlsExtendedMasterSecret }
                                 );
 
                     _dtlsHandle.OnAlert += OnDtlsAlert;
 
-                    logger.LogDebug("Starting DLS handshake with role {IceRole}.", IceRole);
+                    logger.LogDebug($"Starting DLS handshake with role {IceRole}.");
 
                     try
                     {
                         bool handshakeResult = await Task.Run(() => DoDtlsHandshake(_dtlsHandle)).ConfigureAwait(false);
 
-                        connectionState = handshakeResult ? RTCPeerConnectionState.connected : connectionState = RTCPeerConnectionState.failed;
+                        connectionState = (handshakeResult) ? RTCPeerConnectionState.connected : connectionState = RTCPeerConnectionState.failed;
                         onconnectionstatechange?.Invoke(connectionState);
 
                         if (connectionState == RTCPeerConnectionState.connected)
@@ -594,7 +545,7 @@ namespace SIPSorcery.Net
                     }
                     catch (Exception excp)
                     {
-                        logger.LogWarning(excp, "RTCPeerConnection DTLS handshake failed. {ErrorMessage}", excp.Message);
+                        logger.LogWarning(excp, $"RTCPeerConnection DTLS handshake failed. {excp.Message}");
 
                         //connectionState = RTCPeerConnectionState.failed;
                         //onconnectionstatechange?.Invoke(connectionState);
@@ -652,7 +603,7 @@ namespace SIPSorcery.Net
             _configuration?.iceServers,
             _configuration != null ? _configuration.iceTransportPolicy : RTCIceTransportPolicy.all,
             _configuration != null ? _configuration.X_ICEIncludeAllInterfaceAddresses : false,
-            rtpSessionConfig.BindPort == 0 ? 0 : rtpSessionConfig.BindPort + m_rtpChannelsCount * 2,
+            rtpSessionConfig.BindPort == 0 ? 0 : rtpSessionConfig.BindPort + m_rtpChannelsCount * 2 + 2,
             rtpSessionConfig.RtpPortRange);
 
             if (rtpSessionConfig.IsMediaMultiplexed)
@@ -756,7 +707,7 @@ namespace SIPSorcery.Net
             switch (signalingState)
             {
                 case var sigState when sigState == RTCSignalingState.have_local_offer && sdpType == SdpType.offer:
-                    logger.LogWarning("RTCPeerConnection received an SDP offer but was already in {SignalingState} state. Remote offer rejected.", sigState);
+                    logger.LogWarning($"RTCPeerConnection received an SDP offer but was already in {sigState} state. Remote offer rejected.");
                     return SetDescriptionResultEnum.WrongSdpTypeOfferAfterOffer;
             }
 
@@ -792,7 +743,7 @@ namespace SIPSorcery.Net
                         }
                         else
                         {
-                            logger.LogWarning("The remote SDP requested an unsupported data channel transport of {Transport}.", ann.Transport);
+                            logger.LogWarning($"The remote SDP requested an unsupported data channel transport of {ann.Transport}.");
                             return SetDescriptionResultEnum.DataChannelTransportNotSupported;
                         }
                     }
@@ -830,7 +781,7 @@ namespace SIPSorcery.Net
                     }
                     else
                     {
-                        logger.LogWarning("The DTLS fingerprint was invalid or not supported.");
+                        logger.LogWarning($"The DTLS fingerprint was invalid or not supported.");
                         return SetDescriptionResultEnum.DtlsFingerprintDigestNotSupported;
                     }
                 }
@@ -850,6 +801,7 @@ namespace SIPSorcery.Net
                     }
                 }
 
+
                 ResetRemoteSDPSsrcAttributes();
                 foreach (var media in remoteSdp.Media)
                 {
@@ -863,8 +815,10 @@ namespace SIPSorcery.Net
 
                     AddRemoteSDPSsrcAttributes(media.Media, media.SsrcAttributes);
                 }
-
+                logger.LogDebug($"SDP:[{remoteSdp}]");
                 LogRemoteSDPSsrcAttributes();
+
+
 
                 UpdatedSctpDestinationPort();
 
@@ -899,10 +853,10 @@ namespace SIPSorcery.Net
         {
             if (!IsClosed)
             {
-                logger.LogDebug("Peer connection closed with reason {Reason}.", reason != null ? reason : "<none>");
+                logger.LogDebug($"Peer connection closed with reason {(reason != null ? reason : "<none>")}.");
 
                 // Close all DataChannels
-                if (DataChannels?.Count >0)
+                if (DataChannels?.Count > 0)
                 {
                     foreach (var dc in DataChannels)
                     {
@@ -1213,6 +1167,7 @@ namespace SIPSorcery.Net
             // In theory it would be better to an async/await but that would result in a breaking
             // change to the API and for a one off (once per class instance not once per method call)
             // delay of a few hundred milliseconds it was decided not to break the API.
+
             using (var ct = new CancellationTokenSource(TimeSpan.FromMilliseconds(_configuration.X_GatherTimeoutMs)))
             {
                 try
@@ -1239,12 +1194,13 @@ namespace SIPSorcery.Net
                     }
                 }
             }
-
+            
             SDP offerSdp = new SDP(IPAddress.Loopback);
             offerSdp.SessionId = LocalSdpSessionID;
 
             string dtlsFingerprint = this.DtlsCertificateFingerprint.ToString();
             bool iceCandidatesAdded = false;
+
 
             // Local function to add ICE candidates to one of the media announcements.
             void AddIceCandidates(SDPMediaAnnouncement announcement)
@@ -1269,7 +1225,8 @@ namespace SIPSorcery.Net
                         announcement.AddExtra($"a={SDP.END_ICE_CANDIDATES_ATTRIBUTE}");
                     }
                 }
-            };
+            }
+            ;
 
             // Media announcements must be in the same order in the offer and answer.
             int mediaIndex = 0;
@@ -1302,7 +1259,7 @@ namespace SIPSorcery.Net
 
                 if (mindex == SDP.MEDIA_INDEX_NOT_PRESENT)
                 {
-                    logger.LogWarning("Media announcement for {Kind} omitted due to no reciprocal remote announcement.", mediaStream.LocalTrack.Kind);
+                    logger.LogWarning($"Media announcement for {mediaStream.LocalTrack.Kind} omitted due to no reciprocal remote announcement.");
                 }
                 else
                 {
@@ -1352,7 +1309,7 @@ namespace SIPSorcery.Net
 
                 if (mindex == SDP.MEDIA_INDEX_NOT_PRESENT)
                 {
-                    logger.LogWarning("Media announcement for data channel establishment omitted due to no reciprocal remote announcement.");
+                    logger.LogWarning($"Media announcement for data channel establishment omitted due to no reciprocal remote announcement.");
                 }
                 else
                 {
@@ -1410,7 +1367,7 @@ namespace SIPSorcery.Net
         /// <paramref name="localPort">The local port on the RTP socket that received the packet.</paramref>
         /// <param name="remoteEP">The remote end point the packet was received from.</param>
         /// <param name="buffer">The data received.</param>
-        private void OnRTPDataReceived(int localPort, IPEndPoint remoteEP, byte[] buffer)
+        private void OnRTPDataReceived(int localPort, IPEndPoint remoteEP, ReadOnlySpan<byte> buffer)
         {
             //logger.LogDebug($"RTP channel received a packet from {remoteEP}, {buffer?.Length} bytes.");
 
@@ -1419,11 +1376,11 @@ namespace SIPSorcery.Net
             // Because DTLS packets can be fragmented and RTP/RTCP should never be use the RTP/RTCP 
             // prefix to distinguish.
 
-            if (buffer?.Length > 0)
+            if (buffer.Length > 0)
             {
                 try
                 {
-                    if (buffer?.Length > RTPHeader.MIN_HEADER_LEN && buffer[0] >= 128 && buffer[0] <= 191)
+                    if (buffer.Length > RTPHeader.MIN_HEADER_LEN && buffer[0] >= 128 && buffer[0] <= 191)
                     {
                         // RTP/RTCP packet.
                         base.OnReceive(localPort, remoteEP, buffer);
@@ -1437,13 +1394,13 @@ namespace SIPSorcery.Net
                         }
                         else
                         {
-                            logger.LogWarning("DTLS packet received {BufferLength} bytes from {RemoteEndPoint} but no DTLS transport available.", buffer.Length, remoteEP);
+                            logger.LogWarning($"DTLS packet received {buffer.Length} bytes from {remoteEP} but no DTLS transport available.");
                         }
                     }
                 }
                 catch (Exception excp)
                 {
-                    logger.LogError(excp, "Exception RTCPeerConnection.OnRTPDataReceived {ErrorMessage}", excp.Message);
+                    logger.LogError($"Exception RTCPeerConnection.OnRTPDataReceived {excp}");
                 }
             }
         }
@@ -1479,7 +1436,7 @@ namespace SIPSorcery.Net
             }
             else
             {
-                logger.LogWarning("Remote ICE candidate not added as no available ICE session for component {Component}.", candidate.component);
+                logger.LogWarning($"Remote ICE candidate not added as no available ICE session for component {candidate.component}.");
             }
         }
 
@@ -1603,7 +1560,7 @@ namespace SIPSorcery.Net
             }
             catch (Exception excp)
             {
-                logger.LogError(excp, "SCTP exception establishing association, data channels will not be available. {ErrorMessage}", excp.Message);
+                logger.LogError($"SCTP exception establishing association, data channels will not be available. {excp}");
                 sctp?.Close();
             }
         }
@@ -1635,18 +1592,11 @@ namespace SIPSorcery.Net
         /// </summary>
         private void OnSctpAssociationNewDataChannel(ushort streamID, DataChannelTypes type, ushort priority, uint reliability, string label, string protocol)
         {
-            logger.LogInformation("WebRTC new data channel opened by remote peer for stream ID {StreamID}, type {Type}, priority {Priority}, reliability {Reliability}, label {Label}, protocol {Protocol}.",
-                streamID, type, priority, reliability, label, protocol);
+            logger.LogInformation($"WebRTC new data channel opened by remote peer for stream ID {streamID}, type {type}, " +
+                $"priority {priority}, reliability {reliability}, label {label}, protocol {protocol}.");
 
             // TODO: Set reliability, priority etc. properties on the data channel.
-            var dc = new RTCDataChannel(sctp)
-            {
-                id = streamID,
-                label = label,
-                IsOpened = true,
-                readyState = RTCDataChannelState.open,
-                protocol = protocol
-            };
+            var dc = new RTCDataChannel(sctp) { id = streamID, label = label, IsOpened = true, readyState = RTCDataChannelState.open };
 
             dc.SendDcepAck();
 
@@ -1657,7 +1607,7 @@ namespace SIPSorcery.Net
             else
             {
                 // TODO: What's the correct behaviour here?? I guess use the newest one and remove the old one?
-                logger.LogWarning("WebRTC duplicate data channel requested for stream ID {StreamID}.", streamID);
+                logger.LogWarning($"WebRTC duplicate data channel requested for stream ID {streamID}.");
             }
         }
 
@@ -1670,7 +1620,7 @@ namespace SIPSorcery.Net
             dataChannels.TryGetChannel(streamID, out var dc);
 
             string label = dc != null ? dc.label : "<none>";
-            logger.LogDebug("WebRTC data channel opened label {Label} and stream ID {StreamID}.", label, streamID);
+            logger.LogInformation($"WebRTC data channel opened label {label} and stream ID {streamID}.");
 
             if (dc != null)
             {
@@ -1678,7 +1628,7 @@ namespace SIPSorcery.Net
             }
             else
             {
-                logger.LogWarning("WebRTC data channel got ACK but data channel not found for stream ID {StreamID}.", streamID);
+                logger.LogWarning($"WebRTC data channel got ACK but data channel not found for stream ID {streamID}.");
             }
         }
 
@@ -1693,7 +1643,7 @@ namespace SIPSorcery.Net
             }
             else
             {
-                logger.LogWarning("WebRTC data channel got data but no channel found for stream ID {StreamID}.", frame.StreamID);
+                logger.LogWarning($"WebRTC data channel got data but no channel found for stream ID {frame.StreamID}.");
             }
         }
 
@@ -1701,7 +1651,7 @@ namespace SIPSorcery.Net
         /// When a data channel is requested an SCTP association is needed. This method attempts to 
         /// initialise the association if it is not already available.
         /// </summary>
-        private async Task InitialiseSctpAssociation()
+        private async Task InitialiseSctpAssociation(CancellationToken cancel = default)
         {
             if (sctp.RTCSctpAssociation.State != SctpAssociationState.Established)
             {
@@ -1713,7 +1663,7 @@ namespace SIPSorcery.Net
                 TaskCompletionSource<bool> onSctpConnectedTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 sctp.OnStateChanged += (state) =>
                 {
-                    logger.LogDebug("SCTP transport for create data channel request changed to state {State}.", state);
+                    logger.LogDebug($"SCTP transport for create data channel request changed to state {state}.");
 
                     if (state == RTCSctpTransportState.Connected)
                     {
@@ -1723,7 +1673,7 @@ namespace SIPSorcery.Net
 
                 DateTime startTime = DateTime.Now;
 
-                var completedTask = await Task.WhenAny(onSctpConnectedTcs.Task, Task.Delay(SCTP_ASSOCIATE_TIMEOUT_SECONDS * 1000)).ConfigureAwait(false);
+                var completedTask = await Task.WhenAny(onSctpConnectedTcs.Task, Task.Delay(SCTP_ASSOCIATE_TIMEOUT_SECONDS * 1000, cancel)).ConfigureAwait(false);
 
                 if (sctp.state != RTCSctpTransportState.Connected)
                 {
@@ -1750,9 +1700,9 @@ namespace SIPSorcery.Net
         /// </remarks>
         /// <param name="label">The label used to identify the data channel.</param>
         /// <returns>The data channel created.</returns>
-        public async Task<RTCDataChannel> createDataChannel(string label, RTCDataChannelInit init = null)
+        public async Task<RTCDataChannel> createDataChannel(string label, RTCDataChannelInit init = null, CancellationToken cancel = default)
         {
-            logger.LogDebug("Data channel create request for label {Label}.", label);
+            logger.LogDebug($"Data channel create request for label {label}.");
 
             RTCDataChannel channel = new RTCDataChannel(sctp, init)
             {
@@ -1774,7 +1724,7 @@ namespace SIPSorcery.Net
                     if (sctp.RTCSctpAssociation == null ||
                         sctp.RTCSctpAssociation.State != SctpAssociationState.Established)
                     {
-                        await InitialiseSctpAssociation().ConfigureAwait(false);
+                        await InitialiseSctpAssociation(cancel).ConfigureAwait(false);
                     }
 
                     dataChannels.AddActiveChannel(channel);
@@ -1784,6 +1734,7 @@ namespace SIPSorcery.Net
                     TaskCompletionSource<string> isopen = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
                     channel.onopen += () => isopen.TrySetResult(string.Empty);
                     channel.onerror += (err) => isopen.TrySetResult(err);
+                    using var _ = cancel.Register(() => isopen.TrySetResult("cancelled"));
                     var error = await isopen.Task.ConfigureAwait(false);
 
                     if (error != string.Empty)
@@ -1815,12 +1766,12 @@ namespace SIPSorcery.Net
         {
             if (dataChannel.negotiated)
             {
-                logger.LogDebug("WebRTC data channel negotiated out of band with label {Label} and stream ID {StreamID}; invoking open event", dataChannel.label, dataChannel.id);
+                logger.LogDebug($"WebRTC data channel negotiated out of band with label {dataChannel.label} and stream ID {dataChannel.id}; invoking open event");
                 dataChannel.GotAck();
             }
             else if (dataChannel.id.HasValue)
             {
-                logger.LogDebug("WebRTC attempting to open data channel with label {Label} and stream ID {StreamID}.", dataChannel.label, dataChannel.id);
+                logger.LogDebug($"WebRTC attempting to open data channel with label {dataChannel.label} and stream ID {dataChannel.id}.");
                 dataChannel.SendDcepOpen();
             }
             else
@@ -1854,36 +1805,32 @@ namespace SIPSorcery.Net
             if (!handshakeResult)
             {
                 handshakeError = handshakeError ?? "unknown";
-                logger.LogWarning("RTCPeerConnection DTLS handshake failed with error {HandshakeError}.", handshakeError);
+                logger.LogWarning($"RTCPeerConnection DTLS handshake failed with error {handshakeError}.");
                 Close("dtls handshake failed");
                 return false;
             }
             else
             {
-                logger.LogDebug("RTCPeerConnection DTLS handshake result {HandshakeResult}, is handshake complete {IsHandshakeComplete}.", handshakeResult, dtlsHandle.IsHandshakeComplete());
-
-                var remoteCertificate = dtlsHandle.GetRemoteCertificate().GetCertificateAt(0);
-                // Save this log message to webrtc.pem and then to decode use: openssl x509 -in webrtc.pem -text -noout
-                logger.LogTrace("Remote peer DTLS certificate, signature algorithm {RemoteCertificateSignatureAlgorithm}.\n-----BEGIN CERTIFICATE-----\n{Certificate}\n-----END CERTIFICATE-----",
-                    DtlsUtils.GetSignatureAlgorithm(remoteCertificate), Convert.ToBase64String(remoteCertificate.GetDerEncoded()));
+                logger.LogDebug($"RTCPeerConnection DTLS handshake result {handshakeResult}, is handshake complete {dtlsHandle.IsHandshakeComplete()}.");
 
                 var expectedFp = RemotePeerDtlsFingerprint;
-                var remoteFingerprint = DtlsUtils.Fingerprint(expectedFp.algorithm, remoteCertificate);
+                var remoteFingerprint = DtlsUtils.Fingerprint(expectedFp.algorithm, dtlsHandle.GetRemoteCertificate().GetCertificateAt(0));
 
                 if (remoteFingerprint.value?.ToUpper() != expectedFp.value?.ToUpper())
                 {
-                    logger.LogWarning("RTCPeerConnection remote certificate fingerprint mismatch, expected {ExpectedFingerprint}, actual {RemoteFingerprint}.", expectedFp, remoteFingerprint);
+                    logger.LogWarning($"RTCPeerConnection remote certificate fingerprint mismatch, expected {expectedFp}, actual {remoteFingerprint}.");
                     Close("dtls fingerprint mismatch");
                     return false;
                 }
                 else
                 {
-                    logger.LogDebug("RTCPeerConnection remote certificate fingerprint matched expected value of {RemoteFingerprintValue} for {RemoteFingerprintAlgorithm}.", remoteFingerprint.value, remoteFingerprint.algorithm);
+                    logger.LogDebug($"RTCPeerConnection remote certificate fingerprint matched expected value of {remoteFingerprint.value} for {remoteFingerprint.algorithm}.");
 
                     SetGlobalSecurityContext(dtlsHandle.ProtectRTP,
                         dtlsHandle.UnprotectRTP,
                         dtlsHandle.ProtectRTCP,
                         dtlsHandle.UnprotectRTCP);
+
 
                     IsDtlsNegotiationComplete = true;
 
@@ -1902,7 +1849,7 @@ namespace SIPSorcery.Net
         {
             if (alertType == AlertTypesEnum.close_notify)
             {
-                logger.LogDebug("SCTP closing transport as a result of DTLS close notification.");
+                logger.LogDebug($"SCTP closing transport as a result of DTLS close notification.");
 
                 // No point keeping the SCTP association open if there is no DTLS transport available.
                 sctp?.Close();
@@ -1910,7 +1857,7 @@ namespace SIPSorcery.Net
             else
             {
                 string alertMsg = !string.IsNullOrEmpty(alertDescription) ? $": {alertDescription}" : ".";
-                logger.LogWarning("DTLS unexpected {AlertLevel} alert {AlertType}{AlertMsg}", alertLevel, alertType, alertMsg);
+                logger.LogWarning($"DTLS unexpected {alertLevel} alert {alertType}{alertMsg}");
             }
         }
 

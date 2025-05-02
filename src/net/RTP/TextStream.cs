@@ -5,8 +5,9 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Sys;
 using SIPSorceryMedia.Abstractions;
+using SIPSorcery.Net;
 
-namespace SIPSorcery.Net
+namespace SIPSorcery.net.RTP
 {
     public class TextStream : MediaStream
     {

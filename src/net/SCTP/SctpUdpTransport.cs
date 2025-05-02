@@ -18,6 +18,7 @@
 //-----------------------------------------------------------------------------
 
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Net;
@@ -65,24 +66,24 @@ namespace SIPSorcery.Net
         /// <param name="localPort">The local port the packet was received on.</param>
         /// <param name="remoteEndPoint">The remote end point the packet was received from.</param>
         /// <param name="packet">A buffer containing the packet.</param>
-        private void OnEncapsulationSocketPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, byte[] packet)
+        private void OnEncapsulationSocketPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> packet)
         {
             try
             {
-                if (!SctpPacket.VerifyChecksum(packet, 0, packet.Length))
+                if (!SctpPacket.VerifyChecksum(packet))
                 {
-                    logger.LogWarning("SCTP packet from UDP {RemoteEndPoint} dropped due to invalid checksum.", remoteEndPoint);
+                    logger.LogWarning($"SCTP packet from UDP {remoteEndPoint} dropped due to invalid checksum.");
                 }
                 else
                 {
-                    var sctpPacket = SctpPacket.Parse(packet, 0, packet.Length);
+                    var sctpPacket = SctpPacketView.Parse(packet);
 
                     // Process packet.
                     if (sctpPacket.Header.VerificationTag == 0)
                     {
                         GotInit(sctpPacket, remoteEndPoint);
                     }
-                    else if (sctpPacket.Chunks.Any(x => x.KnownType == SctpChunkType.COOKIE_ECHO))
+                    else if (sctpPacket.Has(SctpChunkType.COOKIE_ECHO))
                     {
                         // The COOKIE ECHO chunk is the 3rd step in the SCTP handshake when the remote party has
                         // requested a new association be created.
@@ -90,17 +91,17 @@ namespace SIPSorcery.Net
 
                         if (cookie.IsEmpty())
                         {
-                            logger.LogWarning("SCTP error acquiring handshake cookie from COOKIE ECHO chunk.");
+                            logger.LogWarning($"SCTP error acquiring handshake cookie from COOKIE ECHO chunk.");
                         }
                         else
                         {
-                            logger.LogDebug("SCTP creating new association for {RemoteEndPoint}.", remoteEndPoint);
-
+                            logger.LogDebug($"SCTP creating new association for {remoteEndPoint}.");
+                                
                             var association = new SctpAssociation(this, cookie, localPort);
 
                             if (_associations.TryAdd(association.ID, association))
                             {
-                                if (sctpPacket.Chunks.Count > 1)
+                                if (sctpPacket.ChunkCount > 1)
                                 {
                                     // There could be DATA chunks after the COOKIE ECHO chunk.
                                     association.OnPacketReceived(sctpPacket);
@@ -108,7 +109,7 @@ namespace SIPSorcery.Net
                             }
                             else
                             {
-                                logger.LogError("SCTP failed to add new association to dictionary.");
+                                logger.LogError($"SCTP failed to add new association to dictionary.");
                             }
                         }
                     }
@@ -121,7 +122,7 @@ namespace SIPSorcery.Net
             }
             catch (Exception excp)
             {
-                logger.LogError(excp, "Exception SctpTransport.OnEncapsulationSocketPacketReceived. {ErrorMessage}", excp.Message);
+                logger.LogError($"Exception SctpTransport.OnEncapsulationSocketPacketReceived. {excp}");
             }
         }
 
@@ -131,14 +132,23 @@ namespace SIPSorcery.Net
         /// <param name="reason"></param>
         private void OnEncapsulationSocketClosed(string reason)
         {
-            logger.LogInformation("SCTP transport encapsulation receiver closed with reason: {Reason}.", reason);
+            logger.LogInformation($"SCTP transport encapsulation receiver closed with reason: {reason}.");
         }
 
-        public override void Send(string associationID, byte[] buffer, int offset, int length)
+        public override void Send(string associationID, ReadOnlySpan<byte> span)
         {
             if (_associations.TryGetValue(associationID, out var assoc))
             {
-                _udpEncapSocket.SendTo(buffer, offset, length, SocketFlags.None, assoc.Destination);
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(span.Length);
+                span.CopyTo(buffer);
+                try
+                {
+                    _udpEncapSocket.SendTo(buffer, 0, span.Length, SocketFlags.None, assoc.Destination);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
             }
         }
 
