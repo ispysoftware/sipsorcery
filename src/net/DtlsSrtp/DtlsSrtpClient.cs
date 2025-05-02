@@ -47,14 +47,14 @@ namespace SIPSorcery.Net
         public virtual TlsCredentials GetClientCredentials(CertificateRequest certificateRequest)
         {
             short[] certificateTypes = certificateRequest.CertificateTypes;
-            if (certificateTypes == null || !Arrays.Contains(certificateTypes, ClientCertificateType.rsa_sign))
+            if (certificateTypes == null || !Arrays.Contains(certificateTypes, ClientCertificateType.rsa_sign) || !Arrays.Contains(certificateTypes, ClientCertificateType.ecdsa_sign))
             {
                 return null;
             }
 
             return DtlsUtils.LoadSignerCredentials(mContext,
                 certificateRequest.SupportedSignatureAlgorithms,
-                SignatureAlgorithm.rsa,
+                SignatureAlgorithm.ecdsa,
                 mClient.mCertificateChain,
                 mClient.mPrivateKey);
         }
@@ -102,25 +102,6 @@ namespace SIPSorcery.Net
         /// </summary>
         public event Action<AlertLevelsEnum, AlertTypesEnum, string> OnAlert;
 
-        public DtlsSrtpClient(TlsCrypto crypto) :
-            this(crypto, null, null, null)
-        {
-        }
-
-        public DtlsSrtpClient(TlsCrypto crypto, System.Security.Cryptography.X509Certificates.X509Certificate2 certificate) :
-            this(crypto, DtlsUtils.LoadCertificateChain(crypto, certificate), DtlsUtils.LoadPrivateKeyResource(certificate))
-        {
-        }
-
-        public DtlsSrtpClient(TlsCrypto crypto, string certificatePath, string keyPath) :
-            this(crypto, new string[] { certificatePath }, keyPath)
-        {
-        }
-
-        public DtlsSrtpClient(TlsCrypto crypto, string[] certificatesPath, string keyPath) :
-            this(crypto, DtlsUtils.LoadCertificateChain(crypto, certificatesPath), DtlsUtils.LoadPrivateKeyResource(keyPath))
-        {
-        }
 
         public DtlsSrtpClient(TlsCrypto crypto, Certificate certificateChain, Org.BouncyCastle.Crypto.AsymmetricKeyParameter privateKey) :
             this(crypto, certificateChain, privateKey, null)

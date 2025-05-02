@@ -84,11 +84,6 @@ namespace SIPSorcery.Net
 
         public string toJSON()
         {
-            //return "{" +
-            //    $"  \"type\": \"{type}\"," +
-            //    $"  \"sdp\": \"{sdp.Replace(SDP.CRLF, @"\\n").Replace("\"", "\\\"")}\"" +
-            //    "}";
-
             return TinyJson.JSONWriter.ToJson(this);
         }
 
@@ -267,6 +262,8 @@ namespace SIPSorcery.Net
         /// </summary>
         public RTCDtlsFingerprint DtlsCertificateFingerprint { get; private set; }
 
+        public string DtlsCertificateSignatureAlgorithm { get; private set; } = string.Empty;
+
         /// <summary>
         /// The SCTP transport over which SCTP data is sent and received.
         /// </summary>
@@ -425,6 +422,9 @@ namespace SIPSorcery.Net
             }
 
             DtlsCertificateFingerprint = DtlsUtils.Fingerprint(_dtlsCertificate);
+            DtlsCertificateSignatureAlgorithm = DtlsUtils.GetSignatureAlgorithm(_dtlsCertificate);
+
+            logger.LogDebug($"RTCPeerConnection created with DTLS certificate with fingerprint {DtlsCertificateFingerprint} and signature algorithm {DtlsCertificateSignatureAlgorithm}.");
 
             SessionID = Guid.NewGuid().ToString();
             LocalSdpSessionID = Crypto.GetRandomInt(5).ToString();
@@ -522,7 +522,7 @@ namespace SIPSorcery.Net
                                 IceRole == IceRolesEnum.active ?
                                 new DtlsSrtpClient(_crypto, _dtlsCertificate, _dtlsPrivateKey)
                                 { ForceUseExtendedMasterSecret = !disableDtlsExtendedMasterSecret } :
-                                (IDtlsSrtpPeer)new DtlsSrtpServer(_crypto, _dtlsCertificate, _dtlsPrivateKey)
+                                new DtlsSrtpServer(_crypto, _dtlsCertificate, _dtlsPrivateKey)
                                 { ForceUseExtendedMasterSecret = !disableDtlsExtendedMasterSecret }
                                 );
 
@@ -868,7 +868,6 @@ namespace SIPSorcery.Net
                 _dtlsHandle?.Close();
 
                 sctp?.Close();
-
                 base.Close(reason); // Here Audio and/or Video Streams are closed
 
                 connectionState = RTCPeerConnectionState.closed;

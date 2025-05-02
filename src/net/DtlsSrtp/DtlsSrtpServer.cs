@@ -131,23 +131,6 @@ namespace SIPSorcery.Net
         public event Action<AlertLevelsEnum, AlertTypesEnum, string> OnAlert;
 
 
-        public DtlsSrtpServer(TlsCrypto crypto) : this(crypto, (Certificate)null, null)
-        {
-        }
-
-        public DtlsSrtpServer(TlsCrypto crypto, System.Security.Cryptography.X509Certificates.X509Certificate2 certificate) : this(crypto,DtlsUtils.LoadCertificateChain(crypto,certificate), DtlsUtils.LoadPrivateKeyResource(certificate))
-        {
-        }
-
-        public DtlsSrtpServer(TlsCrypto crypto, string certificatePath, string keyPath) : this(crypto, new string[] { certificatePath }, keyPath)
-        {
-        }
-
-        public DtlsSrtpServer(TlsCrypto crypto, string[] certificatesPath, string keyPath) :
-            this(crypto, DtlsUtils.LoadCertificateChain(crypto, certificatesPath), DtlsUtils.LoadPrivateKeyResource(keyPath))
-        {
-        }
-
         public DtlsSrtpServer(TlsCrypto crypto, Certificate certificateChain, AsymmetricKeyParameter privateKey) : base(crypto)
         {
             if (certificateChain == null && privateKey == null)
