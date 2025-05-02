@@ -27,9 +27,6 @@
 // - P-384, also known as secp384r1.
 // - P-521, also known as secp521r1.
 //
-// TODO: Switch the self-signed certificates generated in this class to use
-// ECDSA instead of RSA.
-//
 // Author(s):
 // Rafael Soares (raf.csoares@kyubinteractive.com)
 //

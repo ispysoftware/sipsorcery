@@ -81,7 +81,9 @@ namespace SIPSorcery.Media
         private static void Fill<T>(T[] array, int start, int end, T value)
         {
             for (var i = start; i < end; i++)
+            {
                 array[i] = value;
+            }
         }
 
         private void packetize(short[] serial, byte[] outFrame, int outFrameOffset)
@@ -89,6 +91,7 @@ namespace SIPSorcery.Media
             Fill(outFrame, outFrameOffset, outFrameOffset + L_FRAME / 8, (byte)0);
 
             for (var s = 0; s < L_FRAME; s++)
+            {
                 if (BIT_1 == serial[2 + s])
                 {
                     var o = outFrameOffset + s / 8;
@@ -97,6 +100,7 @@ namespace SIPSorcery.Media
                     out_ |= 1 << (7 - s % 8);
                     outFrame[o] = (byte)(out_ & 0xFF);
                 }
+            }
         }
 
         /**
@@ -110,8 +114,9 @@ namespace SIPSorcery.Media
             var new_speech = codLd8k.new_speech; /* Pointer to new speech data   */
             var new_speech_offset = codLd8k.new_speech_offset;
 
-            for (var i = 0; i < L_FRAME; i++)
+            for (var i = 0; i < L_FRAME; i++) { 
                 new_speech[new_speech_offset + i] = sp16[i];
+            }
 
             preProc.pre_process(new_speech, new_speech_offset, L_FRAME);
 

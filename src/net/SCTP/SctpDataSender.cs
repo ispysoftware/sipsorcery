@@ -38,14 +38,14 @@ namespace SIPSorcery.Net
         /// Used to limit the number of packets that are sent at any one time, i.e. when 
         /// the transmit timer fires do not send more than this many packets.
         /// </summary>
-        public const int MAX_BURST = 64;
+        public const int MAX_BURST = 6;
 
         /// <summary>
         /// Milliseconds to wait between bursts if no SACK chunks are received in the interim.
         /// Eventually if no SACK chunks are received the congestion or receiver windows
         /// will reach zero and enforce a longer period.
         /// </summary>
-        public const int BURST_PERIOD_MILLISECONDS = 5;
+        public const int BURST_PERIOD_MILLISECONDS = 10;
 
         /// <summary>
         /// Retransmission timeout initial value.
