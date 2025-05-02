@@ -59,7 +59,7 @@ namespace SIPSorcery.Net
         /// <remarks>
         /// https://www.w3.org/TR/webrtc/#sctp-transport-update-mms
         /// </remarks>
-        internal const uint SCTP_DEFAULT_MAX_MESSAGE_SIZE = 65536;//262144;
+        internal const uint SCTP_DEFAULT_MAX_MESSAGE_SIZE = 262144;
 
         private static readonly ILogger logger = Log.Logger;
 

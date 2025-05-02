@@ -81,7 +81,6 @@ namespace SIPSorcery.Net
         /// <summary>Only ever accessed inside <see cref="GotSack(SctpChunkView)"/></summary>
         private uint _fastRecoveryExitPoint;
         private ManualResetEventSlim _senderMre = new ManualResetEventSlim();
-        private readonly ManualResetEventSlim _queueSpaceAvailable = new ManualResetEventSlim(initialState: true);
 
         /// <summary>
         /// Congestion control window (cwnd, in bytes), which is adjusted by
@@ -316,12 +315,6 @@ namespace SIPSorcery.Net
         /// <param name="data">The byte data to send.</param>
         public void SendData(ushort streamID, uint ppid, ReadOnlySpan<byte> data)
         {
-            // combined spin/lock wait
-            while (!_queueSpaceAvailable.Wait(TimeSpan.FromMilliseconds(10)) && _sendQueue.Count > MaxSendQueueCount)
-            {
-
-            }
-
             lock (_sendQueue)
             {
                 if (_closed.HasOccurred)
@@ -364,11 +357,6 @@ namespace SIPSorcery.Net
                     _sendQueue.Enqueue(dataChunk);
 
                     Interlocked.Increment(ref tsn);
-                }
-
-                if (_sendQueue.Count > MaxSendQueueCount)
-                {
-                    _queueSpaceAvailable.Reset();
                 }
 
                 _senderMre.Set();
@@ -678,16 +666,13 @@ namespace SIPSorcery.Net
                         if (_unconfirmedChunks.TryAdd(dataChunk.TSN, dataChunk))
                         {
                             _sendDataChunk(dataChunk);
+                            chunksSent++;
                         }
                         else
                         {
                             logger.LogDebug("SCTP duplicate TSN {TSN} detected in send queue.", dataChunk.TSN);
                         }
-                        if (_sendQueue.Count < MaxSendQueueCount)
-                        {
-                            _queueSpaceAvailable.Set();
-                        }
-                        chunksSent++;
+                        
                     }
                 }
 
