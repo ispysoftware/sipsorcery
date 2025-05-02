@@ -47,14 +47,14 @@ namespace SIPSorcery.Net
         public virtual TlsCredentials GetClientCredentials(CertificateRequest certificateRequest)
         {
             short[] certificateTypes = certificateRequest.CertificateTypes;
-            if (certificateTypes == null || !Arrays.Contains(certificateTypes, ClientCertificateType.ecdsa_sign))
+            if (certificateTypes == null || !Arrays.Contains(certificateTypes, ClientCertificateType.rsa_sign))
             {
                 return null;
             }
 
             return DtlsUtils.LoadSignerCredentials(mContext,
                 certificateRequest.SupportedSignatureAlgorithms,
-                SignatureAlgorithm.ecdsa,
+                SignatureAlgorithm.rsa,
                 mClient.mCertificateChain,
                 mClient.mPrivateKey);
         }

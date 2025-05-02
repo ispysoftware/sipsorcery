@@ -2511,7 +2511,7 @@ namespace SIPSorcery.Net
 
 
             var rtcpPkt = new RTCPCompoundPacket(buffer);
-            if (rtcpPkt != null)
+            if (rtcpPkt == null)
             {
                 logger.LogWarning("Failed to parse RTCP compound report.");
                 return;

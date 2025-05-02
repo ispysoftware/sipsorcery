@@ -20,11 +20,13 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Tls;
 using Org.BouncyCastle.Tls.Crypto;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
+using Org.BouncyCastle.Crypto.Tls;
 using Org.BouncyCastle.Utilities;
 using SIPSorcery.Sys;
 
@@ -92,14 +94,16 @@ namespace SIPSorcery.Net
 
         Certificate mCertificateChain = null;
         AsymmetricKeyParameter mPrivateKey = null;
+        bool mIsEcdsaCertificate = false;
 
         private RTCDtlsFingerprint mFingerPrint;
 
-        //private AlgorithmCertificate algorithmCertificate;
+        private string mSignatureAlgorithm;
 
         public bool ForceUseExtendedMasterSecret { get; set; } = true;
 
         public Certificate ClientCertificate { get; private set; }
+
 
         // the server response to the client handshake request
         // http://tools.ietf.org/html/rfc5764#section-4.1.1
@@ -116,6 +120,8 @@ namespace SIPSorcery.Net
         private SrtpPolicy srtpPolicy;
         private SrtpPolicy srtcpPolicy;
 
+        private int[] cipherSuites;
+
         /// <summary>
         /// Parameters:
         ///  - alert level,
@@ -123,6 +129,7 @@ namespace SIPSorcery.Net
         ///  - alert description.
         /// </summary>
         public event Action<AlertLevelsEnum, AlertTypesEnum, string> OnAlert;
+
 
         public DtlsSrtpServer(TlsCrypto crypto) : this(crypto, (Certificate)null, null)
         {
@@ -148,12 +155,44 @@ namespace SIPSorcery.Net
                 (certificateChain, privateKey) = DtlsUtils.CreateSelfSignedTlsCert(crypto);
             }
 
+            // Check if the certificate is ECDSA or RSA
+            var certificate = certificateChain.GetCertificateAt(0);
+            var signatureAlgorithmOid = certificate.SigAlgOid;
+
+            // Check if the certificate is ECDSA or RSA based on the OID
+            mIsEcdsaCertificate = signatureAlgorithmOid.StartsWith("1.2.840.10045.4.3"); // OID prefix for ECDSA
+
+            int[] newCipherSuites;
+
+            if (mIsEcdsaCertificate)
+            {
+                // Set only ECDSA-based cipher suites
+                newCipherSuites = new int[]
+                {
+                    CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,            // 0xC02B
+                    CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,               // 0xC009
+                    CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,               // 0xC00A
+                    CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,      // 0xCCA9
+                };
+            }
+            else
+            {
+                // Set only RSA-based cipher suites
+                newCipherSuites = new int[]
+                {
+                    CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,              // 0xC02F
+                    CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,        // 0xCCA8
+                    CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,                 // 0xC013
+                    CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA                  // 0xC014
+                };
+            }
+
+            this.cipherSuites = newCipherSuites;
+
             this.mPrivateKey = privateKey;
             mCertificateChain = certificateChain;
 
             //Generate FingerPrint
-            var certificate = mCertificateChain.GetCertificateAt(0);
-
             this.mFingerPrint = certificate != null ? DtlsUtils.Fingerprint(certificate) : null;
         }
 
@@ -211,7 +250,6 @@ namespace SIPSorcery.Net
              * must be negotiated only if the server can successfully complete the handshake while using the curves and point
              * formats supported by the client [...].
              */
-
             int[] cipherSuites = GetCipherSuites();
             for (int i = 0; i < cipherSuites.Length; ++i)
             {
