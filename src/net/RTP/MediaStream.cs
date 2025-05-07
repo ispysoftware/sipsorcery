@@ -144,7 +144,10 @@ namespace SIPSorcery.net.RTP
 
                 if (value)
                 {
-                    RtcpSession.OnTimeout -= RaiseOnTimeoutByIndex;
+                    if (RtcpSession != null)
+                    {
+                        RtcpSession.OnTimeout -= RaiseOnTimeoutByIndex;
+                    }
                 }
 
                 //Clear previous buffer
