@@ -20,6 +20,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -38,7 +39,7 @@ namespace SIPSorcery.Net
         /// Used to limit the number of packets that are sent at any one time, i.e. when 
         /// the transmit timer fires do not send more than this many packets.
         /// </summary>
-        public const int MAX_BURST = 64;
+        public const int MAX_BURST = 8;
 
         /// <summary>
         /// Milliseconds to wait between bursts if no SACK chunks are received in the interim.
@@ -682,6 +683,7 @@ namespace SIPSorcery.Net
                 //logger.LogTrace($"SCTP sender wait period {wait}ms, arwnd {_receiverWindow}, cwnd {_congestionWindow} " +
                 //    $"outstanding bytes {_outstandingBytes}, send queue {_sendQueue.Count}, missing {_missingChunks.Count} "
                 //    + $"unconfirmed {_unconfirmedChunks.Count}.");
+                Debug.WriteLine("WAIT: " + wait);
 
                 _senderMre.Wait(wait);
             }
