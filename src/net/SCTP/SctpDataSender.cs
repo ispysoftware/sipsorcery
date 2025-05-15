@@ -683,8 +683,7 @@ namespace SIPSorcery.Net
                 //logger.LogTrace($"SCTP sender wait period {wait}ms, arwnd {_receiverWindow}, cwnd {_congestionWindow} " +
                 //    $"outstanding bytes {_outstandingBytes}, send queue {_sendQueue.Count}, missing {_missingChunks.Count} "
                 //    + $"unconfirmed {_unconfirmedChunks.Count}.");
-                Debug.WriteLine("WAIT: " + wait);
-
+                
                 _senderMre.Wait(wait);
             }
 
