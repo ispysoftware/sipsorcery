@@ -396,6 +396,16 @@ namespace SIPSorcery.Net
         public IPEndPoint RTPLocalEndPoint { get; private set; }
 
         /// <summary>
+        /// This end point can be set by the application if it is able to determine the external endoint of the RTP socket
+        /// in a NAT environment. This end point will be used when sending SDP offers and answers to indicate the RTP socket's
+        /// public end point. This end point will be used when setting the conenction information in the SDP for VoIP scenarios,
+        /// it's not used for WebRTC scenarios since the ICE negotiation does a much better job of determining the public end point.
+        /// Gerenally this property should not be set and it's only provided for some specialist cases and diagnostic purposes. If
+        /// the RTP channel is behind anythng but a full cone NAT then setting this property is likely to cause more harm than good.
+        /// </summary>
+        public IPEndPoint RTPDynamicNATEndPoint { get; set; }
+
+        /// <summary>
         /// The local port we are listening for RTCP packets on.
         /// </summary>
         public int ControlPort { get; private set; }

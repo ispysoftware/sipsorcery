@@ -38,7 +38,13 @@ namespace SIPSorcery.SIP.App
             {
                 if (sdpBody != null && publicIPAddress != null)
                 {
-                    IPAddress addr = SDP.GetSDPRTPEndPoint(sdpBody).Address;
+                    var sdpEndPoint = SDP.GetSDPRTPEndPoint(sdpBody);
+                    if (sdpEndPoint == null)
+                    {
+                        logger.LogWarning("SDP mangling failed to find a valid RTP endpoint in the SDP body.");
+                        return sdpBody;
+                    }
+
                     //rj2: need to consider publicAddress and IPv6 for mangling
                     IPAddress pubaddr = IPAddress.Parse(publicIPAddress);
                     var addr = sdpEndPoint.Address;

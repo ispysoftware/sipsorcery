@@ -294,7 +294,7 @@ namespace SIPSorcery.Net
         }
 
 
-#endregion
+        #endregion
 
         /// <summary>
         /// Verifies the hash algorithm is supported by the utility functions in this class.

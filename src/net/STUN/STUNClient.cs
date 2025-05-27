@@ -142,11 +142,11 @@ public class STUNClient
     {
         var tcs = new TaskCompletionSource<IPEndPoint>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        void OnRtpDataReceived(int localPort, IPEndPoint remoteEndPoint, byte[] packet)
+        void OnRtpDataReceived(int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> packet)
         {
             try
             {
-                if (packet?.Length > 0)
+                if (packet.Length > 0)
                 {
                     logger.LogDebug("STUNClient response received from {StunResponseEndPoint}.", remoteEndPoint);
 

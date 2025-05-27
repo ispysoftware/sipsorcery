@@ -15,13 +15,10 @@
 
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using Microsoft.Extensions.Logging;
-using Org.BouncyCastle.Crypto;
-using Org.BouncyCastle.Crypto.Tls;
-using Org.BouncyCastle.Security;
 using Org.BouncyCastle.Tls;
-using Org.BouncyCastle.Tls.Crypto;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.Utilities;
 using SIPSorcery.Sys;
 using System.Collections.Generic;
 using Org.BouncyCastle.Crypto;
@@ -49,7 +46,7 @@ namespace SIPSorcery.Net
 
         public virtual TlsCredentials GetClientCredentials(CertificateRequest certificateRequest)
         {
-            byte[] certificateTypes = certificateRequest.CertificateTypes;
+            short[] certificateTypes = certificateRequest.CertificateTypes;
             if (certificateTypes == null || !Arrays.Contains(certificateTypes, ClientCertificateType.rsa_sign) || !Arrays.Contains(certificateTypes, ClientCertificateType.ecdsa_sign))
             {
                 return null;
@@ -61,11 +58,6 @@ namespace SIPSorcery.Net
                 mClient.mCertificateChain,
                 mClient.mPrivateKey);
         }
-
-        public TlsCredentials GetClientCredentials(TlsContext context, CertificateRequest certificateRequest)
-        {
-            return GetClientCredentials(certificateRequest);
-        }
     };
 
     public class DtlsSrtpClient : DefaultTlsClient, IDtlsSrtpPeer
@@ -74,7 +66,6 @@ namespace SIPSorcery.Net
 
         internal Certificate mCertificateChain = null;
         internal AsymmetricKeyParameter mPrivateKey = null;
-        bool mIsEcdsaCertificate = false;
 
         internal TlsClientContext TlsContext
         {
@@ -97,6 +88,7 @@ namespace SIPSorcery.Net
         private byte[] srtpMasterServerKey;
         private byte[] srtpMasterClientSalt;
         private byte[] srtpMasterServerSalt;
+        private byte[] masterSecret = null;
 
         // Policies
         private SrtpPolicy srtpPolicy;
@@ -110,33 +102,15 @@ namespace SIPSorcery.Net
         /// </summary>
         public event Action<AlertLevelsEnum, AlertTypesEnum, string> OnAlert;
 
-        public DtlsSrtpClient() :
-            this(null, null, null)
+
+        public DtlsSrtpClient(TlsCrypto crypto, Certificate certificateChain, Org.BouncyCastle.Crypto.AsymmetricKeyParameter privateKey) :
+            this(crypto, certificateChain, privateKey, null)
         {
         }
 
-        public DtlsSrtpClient(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate) :
-            this(DtlsUtils.LoadCertificateChain(certificate), DtlsUtils.LoadPrivateKeyResource(certificate))
+        public DtlsSrtpClient(TlsCrypto crypto, Certificate certificateChain, Org.BouncyCastle.Crypto.AsymmetricKeyParameter privateKey, UseSrtpData clientSrtpData) : base(crypto)
         {
-        }
 
-        public DtlsSrtpClient(string certificatePath, string keyPath) :
-            this(new string[] { certificatePath }, keyPath)
-        {
-        }
-
-        public DtlsSrtpClient(string[] certificatesPath, string keyPath) :
-            this(DtlsUtils.LoadCertificateChain(certificatesPath), DtlsUtils.LoadPrivateKeyResource(keyPath))
-        {
-        }
-
-        public DtlsSrtpClient(Certificate certificateChain, AsymmetricKeyParameter privateKey) :
-            this(certificateChain, privateKey, null)
-        {
-        }
-
-        public DtlsSrtpClient(Certificate certificateChain, AsymmetricKeyParameter privateKey, UseSrtpData clientSrtpData)
-        {
             if (certificateChain == null && privateKey == null)
             {
                 (certificateChain, privateKey) = DtlsUtils.CreateSelfSignedTlsCert(crypto);
@@ -161,16 +135,13 @@ namespace SIPSorcery.Net
             //Generate FingerPrint
             var certificate = mCertificateChain.GetCertificateAt(0);
             Fingerprint = certificate != null ? DtlsUtils.Fingerprint(certificate) : null;
-
-            //TODO: We should be able to support both ECDSA and RSA schemes, search in the certificate chain if both are supported and not just in the first one.
-            // Check if the certificate is ECDSA or RSA based on the OID
-            this.mIsEcdsaCertificate = certificate.SigAlgOid.StartsWith("1.2.840.10045.4.3"); // OID prefix for ECDSA
         }
 
-        public DtlsSrtpClient(UseSrtpData clientSrtpData) : this(null, null, clientSrtpData)
+        public DtlsSrtpClient(TlsCrypto crypto, UseSrtpData clientSrtpData) : this(crypto, null, null, clientSrtpData)
         { }
 
-        public override IDictionary GetClientExtensions()
+
+        public override IDictionary<int, byte[]> GetClientExtensions()
         {
             var clientExtensions = base.GetClientExtensions();
             if (TlsSrpUtilities.GetSrpExtension(clientExtensions) == null)
@@ -381,16 +352,6 @@ namespace SIPSorcery.Net
             Buffer.BlockCopy(sharedSecret, (2 * keyLen + saltLen), srtpMasterServerSalt, 0, saltLen);
         }
 
-        public override ProtocolVersion ClientVersion
-        {
-            get { return ProtocolVersion.DTLSv12; }
-        }
-
-        public override ProtocolVersion MinimumVersion
-        {
-            get { return ProtocolVersion.DTLSv10; }
-        }
-
         public override TlsSession GetSessionToResume()
         {
             return this.mSession;
@@ -428,7 +389,16 @@ namespace SIPSorcery.Net
 
         public Certificate GetRemoteCertificate()
         {
-            return ServerCertificate;
+            return ServerCertificate.Certificate;
+        }
+
+        protected override ProtocolVersion[] GetSupportedVersions()
+        {
+            return new ProtocolVersion[]
+            {
+                ProtocolVersion.DTLSv10,
+                ProtocolVersion.DTLSv12,
+            };
         }
 
         public override void NotifyAlertReceived(short alertLevel, short alertDescription)

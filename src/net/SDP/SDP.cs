@@ -233,7 +233,7 @@ namespace SIPSorcery.Net
                                 break;
 
                             case var l when l.StartsWith("o="):
-                                var ownerFields = sdpLineTrimmed.Substring(2).Split(new []{' '}, 6, StringSplitOptions.RemoveEmptyEntries);
+                                var ownerFields = sdpLineTrimmed.Substring(2).Split(new[] { ' ' }, 6, StringSplitOptions.RemoveEmptyEntries);
 
                                 if (ownerFields.Length >= 5)
                                 {
@@ -438,23 +438,28 @@ namespace SIPSorcery.Net
                                 // TODO: Set a flag.
                                 break;
                             case var l when l.StartsWith(SDPMediaAnnouncement.MEDIA_EXTENSION_MAP_ATTRIBUE_PREFIX):
-                                if (activeAnnouncement != null) {
-                                    if (activeAnnouncement.Media == SDPMediaTypesEnum.audio || activeAnnouncement.Media == SDPMediaTypesEnum.video) {
-                                         var formatAttributeMatch = Regex.Match(sdpLineTrimmed, SDPMediaAnnouncement.MEDIA_EXTENSION_MAP_ATTRIBUE_PREFIX + @"(?<id>\d+) (?<url>\S+)$");
-                                         if (formatAttributeMatch.Success) {
-                                             var extensionId = formatAttributeMatch.Result("${id}");
-                                             var uri = formatAttributeMatch.Result("${url}");
-                                             if (Int32.TryParse(extensionId, out var id)) {
+                                if (activeAnnouncement != null)
+                                {
+                                    if (activeAnnouncement.Media == SDPMediaTypesEnum.audio || activeAnnouncement.Media == SDPMediaTypesEnum.video)
+                                    {
+                                        var formatAttributeMatch = Regex.Match(sdpLineTrimmed, SDPMediaAnnouncement.MEDIA_EXTENSION_MAP_ATTRIBUE_PREFIX + @"(?<id>\d+) (?<url>\S+)$");
+                                        if (formatAttributeMatch.Success)
+                                        {
+                                            var extensionId = formatAttributeMatch.Result("${id}");
+                                            var uri = formatAttributeMatch.Result("${url}");
+                                            if (Int32.TryParse(extensionId, out var id))
+                                            {
                                                 var rtpExtension = RTPHeaderExtension.GetRTPHeaderExtension(id, uri, activeAnnouncement.Media);
-                                                if ( (rtpExtension != null) && !activeAnnouncement.HeaderExtensions.ContainsKey(id))
+                                                if ((rtpExtension != null) && !activeAnnouncement.HeaderExtensions.ContainsKey(id))
                                                 {
                                                     activeAnnouncement.HeaderExtensions.Add(id, rtpExtension);
                                                 }
-                                             }
-                                             else {
-                                                 logger.LogWarning("Invalid id of header extension in " + SDPMediaAnnouncement.MEDIA_EXTENSION_MAP_ATTRIBUE_PREFIX);
-                                             }
-                                         }
+                                            }
+                                            else
+                                            {
+                                                logger.LogWarning("Invalid id of header extension in " + SDPMediaAnnouncement.MEDIA_EXTENSION_MAP_ATTRIBUE_PREFIX);
+                                            }
+                                        }
                                     }
                                 }
 
@@ -764,13 +769,13 @@ namespace SIPSorcery.Net
                                     string pathStr = sdpLineTrimmed.Substring(sdpLineTrimmed.IndexOf(':') + 1);
                                     string pathTrimmedStr = pathStr.Substring(pathStr.IndexOf(':') + 3);
                                     activeAnnouncement.MessageMediaFormat.IP = pathTrimmedStr.Substring(0, pathTrimmedStr.IndexOf(':'));
-                                    
+
                                     pathTrimmedStr = pathTrimmedStr.Substring(pathTrimmedStr.IndexOf(':') + 1);
                                     activeAnnouncement.MessageMediaFormat.Port = pathTrimmedStr.Substring(0, pathTrimmedStr.IndexOf('/'));
-                                    
+
                                     pathTrimmedStr = pathTrimmedStr.Substring(pathTrimmedStr.IndexOf('/') + 1);
                                     activeAnnouncement.MessageMediaFormat.Endpoint = pathTrimmedStr;
-                                    
+
                                 }
                                 else
                                 {
@@ -900,6 +905,10 @@ namespace SIPSorcery.Net
             if (sessionConnection != null && firstMediaOffer != null)
             {
                 return new IPEndPoint(IPAddress.Parse(sessionConnection.ConnectionAddress), firstMediaOffer.Port);
+            }
+            else if (firstMediaOffer != null && firstMediaOffer.Connection != null)
+            {
+                return new IPEndPoint(IPAddress.Parse(firstMediaOffer.Connection.ConnectionAddress), firstMediaOffer.Port);
             }
             else
             {
