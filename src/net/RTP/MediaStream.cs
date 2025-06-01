@@ -411,14 +411,15 @@ namespace SIPSorcery.net.RTP
             return rv;
         }
 
-        protected void SendRtpRaw(byte[] data, uint timestamp, int markerBit, int payloadType, Boolean checkDone, ushort? seqNum = null)
+        protected void SendRtpRaw(ArraySegment<byte> data, uint timestamp, int markerBit, int payloadType, Boolean checkDone, ushort? seqNum = null)
         {
             if (checkDone || CheckIfCanSendRtpRaw())
             {
                 ProtectRtpPacket protectRtpPacket = SecureContext?.ProtectRtpPacket;
                 int srtpProtectionLength = (protectRtpPacket != null) ? RTPSession.SRTP_MAX_PREFIX_LENGTH : 0;
 
-                RTPPacket rtpPacket = new RTPPacket(data.Length + srtpProtectionLength);
+                RTPPacket rtpPacket = new RTPPacket(data, srtpProtectionLength);
+
                 rtpPacket.Header.SyncSource = LocalTrack.Ssrc;
                 rtpPacket.Header.SequenceNumber = seqNum ?? LocalTrack.GetNextSeqNum();
                 //Debug.WriteLine("SendRTPRAW:" + payloadType + ":" + rtpPacket.Header.SequenceNumber);
@@ -487,8 +488,6 @@ namespace SIPSorcery.net.RTP
                     rtpPacket.Header.HeaderExtensionFlag = 0;
                 }
 
-                Buffer.BlockCopy(data, 0, rtpPacket.Payload, 0, data.Length);
-
                 var rtpBuffer = rtpPacket.GetBytes();
 
                 if (protectRtpPacket == null)
@@ -511,6 +510,11 @@ namespace SIPSorcery.net.RTP
 
                 RtcpSession?.RecordRtpPacketSend(rtpPacket);
             }
+        }
+
+        protected void SendRtpRaw(byte[] data, uint timestamp, int markerBit, int payloadType, Boolean checkDone, ushort? seqNum = null)
+        {
+            SendRtpRaw(new ArraySegment<byte>(data), timestamp, markerBit, payloadType, checkDone, seqNum);
         }
 
         /// <summary>
@@ -718,7 +722,7 @@ namespace SIPSorcery.net.RTP
                     return;
                 }
 
-                RaiseOnRtpEventByIndex(remoteEndPoint, new RTPEvent(rtpPacket.Payload), rtpPacket.Header);
+                RaiseOnRtpEventByIndex(remoteEndPoint, new RTPEvent(rtpPacket.GetPayloadBytes()), rtpPacket.Header);
                 return;
             }
 
