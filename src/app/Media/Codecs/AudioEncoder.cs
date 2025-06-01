@@ -59,7 +59,7 @@ namespace SIPSorcery.Media
             new AudioFormat(SDPWellKnownMediaFormatsEnum.G729),
 
             // Need more testing befoer adding OPUS by default. 24 Dec 2024 AC.
-            //new AudioFormat(111, "OPUS", OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1")
+            //new AudioFormat(111, AudioCodecsEnum.OPUS.ToString(), OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1")
         };
 
         public List<AudioFormat> SupportedFormats
@@ -82,8 +82,13 @@ namespace SIPSorcery.Media
 
             if(includeOpus)
             {
-                _supportedFormats.Insert(0,new AudioFormat(111, "OPUS", OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1"));
+                _supportedFormats.Add(new AudioFormat(111, AudioCodecsEnum.OPUS.ToString(), OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1"));
             }
+        }
+
+        public AudioEncoder(params AudioFormat[] supportedFormats)
+        {
+            _supportedFormats = supportedFormats.ToList();
         }
 
         public byte[] EncodeAudio(short[] pcm, AudioFormat format)
@@ -136,9 +141,10 @@ namespace SIPSorcery.Media
             }
             else if (format.FormatName.ToUpper() == "OPUS")
             {
+                var channelCount = format.ChannelCount > 0 ? format.ChannelCount : OPUS_CHANNELS;
+
                 if (_opusEncoder == null)
                 {
-                    Debug.WriteLine($"Creating Opus encoder: {format.ClockRate}Hz, {format.ChannelCount} channels");
                     _opusEncoder = OpusCodecFactory.CreateEncoder(format.ClockRate, format.ChannelCount, OpusApplication.OPUS_APPLICATION_VOIP);
                 }
 
@@ -200,14 +206,9 @@ namespace SIPSorcery.Media
                         return null;
                     }
 
-                    return encodedSample.Take(encodedLength).ToArray();
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Exception during Opus encoding: {ex.GetType().Name}: {ex.Message}");
-                    Debug.WriteLine($"Stack trace: {ex.StackTrace}");
-                    throw;
-                }
+                byte[] encodedSample = new byte[pcm.Length];
+                int encodedLength = _opusEncoder.Encode(pcmFloat, pcmFloat.Length / format.ChannelCount, encodedSample, encodedSample.Length);
+                return encodedSample.Take(encodedLength).ToArray();
             }
             else
             {
@@ -333,19 +334,6 @@ namespace SIPSorcery.Media
         public short[] Resample(short[] pcm, int inRate, int outRate)
         {
             return PcmResampler.Resample(pcm, inRate, outRate);
-        }
-
-        private short ClampToShort(float value)
-        {
-            if (value > short.MaxValue)
-            {
-                return short.MaxValue;
-            }
-            if (value < short.MinValue)
-            {
-                return short.MinValue;
-            }
-            return (short)value;
         }
 
         private float ClampToFloat(float value, float min, float max)
