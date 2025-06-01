@@ -16,6 +16,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using Microsoft.Extensions.Logging;
@@ -420,6 +421,7 @@ namespace SIPSorcery.net.RTP
                 RTPPacket rtpPacket = new RTPPacket(data.Length + srtpProtectionLength);
                 rtpPacket.Header.SyncSource = LocalTrack.Ssrc;
                 rtpPacket.Header.SequenceNumber = seqNum ?? LocalTrack.GetNextSeqNum();
+                //Debug.WriteLine("SendRTPRAW:" + payloadType + ":" + rtpPacket.Header.SequenceNumber);
                 rtpPacket.Header.Timestamp = timestamp;
                 rtpPacket.Header.MarkerBit = markerBit;
                 rtpPacket.Header.PayloadType = payloadType;

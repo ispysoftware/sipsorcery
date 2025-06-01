@@ -13,12 +13,13 @@
 // BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
 //-----------------------------------------------------------------------------
 
-using Concentus;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
-using SIPSorceryMedia.Abstractions;
+using Concentus;
 using Concentus.Enums;
+using SIPSorceryMedia.Abstractions;
 
 namespace SIPSorcery.Media
 {
@@ -51,6 +52,7 @@ namespace SIPSorcery.Media
 
         private List<AudioFormat> _supportedFormats = new List<AudioFormat>
         {
+            //new AudioFormat(111, "OPUS", OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1"),
             new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU),
             new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA),
             new AudioFormat(SDPWellKnownMediaFormatsEnum.G722),
@@ -80,7 +82,7 @@ namespace SIPSorcery.Media
 
             if(includeOpus)
             {
-                _supportedFormats.Add(new AudioFormat(111, "OPUS", OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1"));
+                _supportedFormats.Insert(0,new AudioFormat(111, "OPUS", OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1"));
             }
         }
 
@@ -132,28 +134,113 @@ namespace SIPSorcery.Media
                 // Put on the wire as little endian.
                 return pcm.SelectMany(x => new byte[] { (byte)(x), (byte)(x >> 8) }).ToArray();
             }
-            else if (format.Codec == AudioCodecsEnum.OPUS)
+            else if (format.FormatName.ToUpper() == "OPUS")
             {
                 if (_opusEncoder == null)
                 {
+                    Debug.WriteLine($"Creating Opus encoder: {format.ClockRate}Hz, {format.ChannelCount} channels");
                     _opusEncoder = OpusCodecFactory.CreateEncoder(format.ClockRate, format.ChannelCount, OpusApplication.OPUS_APPLICATION_VOIP);
                 }
 
-                // Opus expects PCM data in float format [-1.0, 1.0].
-                float[] pcmFloat = new float[pcm.Length];
-                for (int i = 0; i < pcm.Length; i++)
+                var audio = ResampleFrom8kHzMonoTo48kHzStereo(pcm);
+
+                int samplesPerChannel = audio.Length / format.ChannelCount;
+
+                // Debug the exact parameters
+                //Debug.WriteLine($"Opus Encode Parameters:");
+                //Debug.WriteLine($"  PCM total samples: {audio.Length}");
+                //Debug.WriteLine($"  Samples per channel: {samplesPerChannel}");
+                //Debug.WriteLine($"  Sample rate: {format.ClockRate}");
+                //Debug.WriteLine($"  Channels: {format.ChannelCount}");
+                //Debug.WriteLine($"  Expected 20ms samples at {format.ClockRate}Hz: {format.ClockRate * 20 / 1000}");
+
+                // Validate frame size
+                int expected20msSamples = (int)(format.ClockRate * 20 / 1000);
+                if (samplesPerChannel != expected20msSamples)
                 {
-                    pcmFloat[i] = pcm[i] / 32768f; // Convert to float range [-1.0, 1.0]
+                    Debug.WriteLine($"WARNING: Frame size mismatch! Got {samplesPerChannel}, expected {expected20msSamples}");
                 }
 
-                byte[] encodedSample = new byte[pcm.Length];
-                int encodedLength = _opusEncoder.Encode(pcmFloat, pcmFloat.Length / format.ChannelCount, encodedSample, encodedSample.Length);
-                return encodedSample.Take(encodedLength).ToArray();
+                // Check for valid 16kHz frame sizes
+                var valid16kHzFrames = new[] { 80, 160, 240, 320, 480, 640, 960 }; // 5ms, 10ms, 15ms, 20ms, 30ms, 40ms, 60ms
+                if (!valid16kHzFrames.Contains(samplesPerChannel))
+                {
+                    Debug.WriteLine($"ERROR: Invalid frame size {samplesPerChannel} for 16kHz. Valid sizes: {string.Join(", ", valid16kHzFrames)}");
+                    return null;
+                }
+
+                byte[] encodedSample = new byte[4000];
+
+                //Debug.WriteLine($"Calling Opus.Encode with frame_size={samplesPerChannel}");
+
+                try
+                {
+                    int encodedLength = _opusEncoder.Encode(audio, samplesPerChannel, encodedSample, encodedSample.Length);
+
+                    //Debug.WriteLine($"Opus encode result: {encodedLength}");
+
+                    if (encodedLength < 0)
+                    {
+                        var errorMessages = new Dictionary<int, string>
+                        {
+                            { -1, "OPUS_BAD_ARG: One or more invalid/out of range arguments" },
+                            { -2, "OPUS_BUFFER_TOO_SMALL: Output buffer too small" },
+                            { -3, "OPUS_INTERNAL_ERROR: Internal error" },
+                            { -4, "OPUS_INVALID_PACKET: Invalid packet" },
+                            { -5, "OPUS_UNIMPLEMENTED: Feature not implemented" },
+                            { -6, "OPUS_INVALID_STATE: Invalid state" },
+                            { -7, "OPUS_ALLOC_FAIL: Memory allocation failed" }
+                        };
+
+                        string errorMsg = errorMessages.ContainsKey(encodedLength)
+                            ? errorMessages[encodedLength]
+                            : $"Unknown error code: {encodedLength}";
+
+                        Debug.WriteLine($"Opus encoding error: {errorMsg}");
+                        return null;
+                    }
+
+                    return encodedSample.Take(encodedLength).ToArray();
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Exception during Opus encoding: {ex.GetType().Name}: {ex.Message}");
+                    Debug.WriteLine($"Stack trace: {ex.StackTrace}");
+                    throw;
+                }
             }
             else
             {
                 throw new ApplicationException($"Audio format {format.Codec} cannot be encoded.");
             }
+        }
+
+        private short[] ResampleFrom8kHzMonoTo48kHzStereo(short[] input8kHzMono)
+        {
+            // Input: 160 mono samples (20ms at 8kHz)
+            // Output: 1920 stereo samples (960 per channel, 20ms at 48kHz)
+
+            var output = new short[input8kHzMono.Length * 6 * 2]; // 6x sample rate, 2x channels
+
+            for (int i = 0; i < input8kHzMono.Length; i++)
+            {
+                short currentSample = input8kHzMono[i];
+                short nextSample = (i < input8kHzMono.Length - 1) ? input8kHzMono[i + 1] : currentSample;
+
+                // Generate 6 interpolated samples for each input sample
+                for (int j = 0; j < 6; j++)
+                {
+                    short interpolatedSample = (short)(currentSample + (nextSample - currentSample) * j / 6);
+
+                    int outputIndex = (i * 6 + j) * 2; // *2 for stereo
+
+                    // Duplicate mono to both stereo channels
+                    output[outputIndex] = interpolatedSample;     // Left channel
+                    output[outputIndex + 1] = interpolatedSample; // Right channel
+                }
+            }
+
+            return output;
         }
 
         /// <summary>

@@ -2504,7 +2504,7 @@ namespace SIPSorcery.Net
                 int res = secureContext.UnprotectRtcpPacket(buffer, buffer.Length, out int outBufLen);
                 if (res != 0)
                 {
-                    logger.LogWarning($"SRTCP unprotect failed for {mediaStream.MediaType} track, result {res}.");
+                    logger.LogWarning($"SRTCP unprotect failed for {PrimaryStream.MediaType} track, result {res}.");
                     return;
                 }
                 else
