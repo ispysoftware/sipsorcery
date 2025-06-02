@@ -2550,18 +2550,9 @@ namespace SIPSorcery.Net
                 }
 
                 hdr.ReceivedTime = DateTime.Now;
-                if (mediaStream.MediaType == SDPMediaTypesEnum.audio)
-                {
-                    Span<byte> buffer = stackalloc byte[bufferRO.Length];
-                    bufferRO.CopyTo(buffer);
-                    mediaStream.OnReceiveRTPPacket(hdr, localPort, remoteEndPoint, buffer, null);
-                }
-                else if (mediaStream.MediaType == SDPMediaTypesEnum.video)
-                {
-                    Span<byte> buffer = stackalloc byte[bufferRO.Length];
-                    bufferRO.CopyTo(buffer);
-                    mediaStream.OnReceiveRTPPacket(hdr, localPort, remoteEndPoint, buffer, mediaStream as VideoStream);
-                }
+                Span<byte> buffer = stackalloc byte[bufferRO.Length];
+                bufferRO.CopyTo(buffer);
+                mediaStream.OnReceiveRTPPacket(hdr, localPort, remoteEndPoint, buffer);
             }
         }
 
@@ -2603,6 +2594,8 @@ namespace SIPSorcery.Net
                     return textStream.LocalTrack;
                 }
             }
+            return null;
+        }
 
         private MediaStream GetMediaStreamFromPayloadType(int payloadId)
         {

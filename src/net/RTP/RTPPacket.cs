@@ -97,7 +97,7 @@ namespace SIPSorcery.Net
         public byte[] GetBytes()
         {
             byte[] header = Header.GetBytes();
-            byte[] packet = new byte[header.Length + Payload.Length];
+            byte[] packet = new byte[header.Length + GetPayloadLength()];
 
             Array.Copy(header, packet, header.Length);
 

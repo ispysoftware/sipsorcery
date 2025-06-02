@@ -709,7 +709,7 @@ namespace SIPSorcery.net.RTP
 
         #region RECEIVE PACKET
 
-        public void OnReceiveRTPPacket(RTPHeader hdr, int localPort, IPEndPoint remoteEndPoint, Span<byte> buffer, VideoStream videoStream = null)
+        public void OnReceiveRTPPacket(RTPHeader hdr, int localPort, IPEndPoint remoteEndPoint, Span<byte> buffer)//, VideoStream videoStream = null)
         {
             RTPPacket rtpPacket;
             if (NegotiatedRtpEventPayloadID != 0 && hdr.PayloadType == NegotiatedRtpEventPayloadID)
@@ -718,7 +718,7 @@ namespace SIPSorcery.net.RTP
                 {
                     // Cache pending packages to use it later to prevent missing frames
                     // when DTLS was not completed yet as a Server bt already completed as a client
-                    AddPendingPackage(hdr, localPort, remoteEndPoint, buffer, videoStream);
+                    AddPendingPackage(hdr, localPort, remoteEndPoint, buffer);//, videoStream);
                     return;
                 }
 
@@ -856,7 +856,7 @@ namespace SIPSorcery.net.RTP
 
         // Cache pending packages to use it later to prevent missing frames
         // when DTLS was not completed yet as a Server but already completed as a client
-        protected virtual bool AddPendingPackage(RTPHeader hdr, int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> buffer, VideoStream videoStream = null)
+        protected virtual bool AddPendingPackage(RTPHeader hdr, int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> buffer)//, VideoStream videoStream = null)
         {
             const int MAX_PENDING_PACKAGES_BUFFER_SIZE = 32;
 
@@ -869,7 +869,7 @@ namespace SIPSorcery.net.RTP
                     {
                         _pendingPackagesBuffer.RemoveAt(0);
                     }
-                    _pendingPackagesBuffer.Add(new PendingPackages(hdr, localPort, remoteEndPoint, buffer.ToArray(), videoStream));
+                    _pendingPackagesBuffer.Add(new PendingPackages(hdr, localPort, remoteEndPoint, buffer.ToArray()));//, videoStream));
                 }
                 return true;
             }
@@ -1029,10 +1029,10 @@ namespace SIPSorcery.net.RTP
 
         public override string ToString() => $"{MediaType}[{Index}]";
 
-        public MediaStream(RtpSessionConfig config, int index)
-        {
-            RtpSessionConfig = config;
-            this.Index = index;
-        }
+        //public MediaStream(RtpSessionConfig config, int index)
+        //{
+        //    RtpSessionConfig = config;
+        //    this.Index = index;
+        //}
     }
 }
