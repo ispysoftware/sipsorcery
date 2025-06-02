@@ -223,7 +223,7 @@ namespace SIPSorcery.Net
             LastActivityAt = DateTime.Now;
             IsTimedOut = false;
             PacketsReceivedCount++;
-            OctetsReceivedCount += rtpPacket.GetPayloadLength();
+            OctetsReceivedCount += (uint)rtpPacket.Payload.Length;
 
             if (m_receptionReport == null)
             {
@@ -256,7 +256,7 @@ namespace SIPSorcery.Net
         public void RecordRtpPacketSend(RTPPacket rtpPacket)
         {
             PacketsSentCount++;
-            OctetsSentCount += rtpPacket.GetPayloadLength();
+            OctetsSentCount += (uint)rtpPacket.Payload.Length;
             LastSeqNum = rtpPacket.Header.SequenceNumber;
             LastRtpTimestampSent = rtpPacket.Header.Timestamp;
             LastNtpTimestampSent = DateTimeToNtpTimestamp(DateTime.Now);
