@@ -49,7 +49,7 @@ namespace SIPSorcery.Net
         {
             Header = new RTPHeader(packet);
             _payload = new byte[Header.PayloadSize];
-            Array.Copy(packet, Header.Length, _payload, 0, _payload.Length);
+            packet.Slice(Header.Length, _payload.Length).CopyTo(_payload);
         }
 
         public RTPPacket(ArraySegment<byte> packet, int srtpProtectionLength)
