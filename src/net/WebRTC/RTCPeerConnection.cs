@@ -41,6 +41,7 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.net.RTP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Sys;
 using Org.BouncyCastle.Tls;
@@ -48,6 +49,21 @@ using Org.BouncyCastle.Tls.Crypto.Impl.BC;
 
 namespace SIPSorcery.Net
 {
+    /// <summary>
+    /// Options for creating the SDP offer.
+    /// </summary>
+    /// <remarks>
+    /// As specified in https://www.w3.org/TR/webrtc/#dictionary-rtcofferoptions-members.
+    /// </remarks>
+    //public class RTCOfferOptions
+    //{
+    //    /// <summary>
+    //    /// If true then a new set of ICE credentials will be generated otherwise any
+    //    /// existing set of credentials will be used.
+    //    /// </summary>
+    //    public bool iceRestart;
+    //}
+
     /// <summary>
     /// Initialiser for the RTCSessionDescription instance.
     /// </summary>
@@ -91,6 +107,33 @@ namespace SIPSorcery.Net
     }
 
     /// <summary>
+    /// Describes a pairing of an RTP sender and receiver and their shared state. The state
+    /// is set by and relevant for the SDP that is controlling the RTP.
+    /// </summary>
+    //public class RTCRtpTransceiver
+    //{
+    //    /// <summary>
+    //    /// The media ID of the SDP m-line associated with this transceiver.
+    //    /// </summary>
+    //    public string MID { get; private set; }
+
+    //    /// <summary>
+    //    /// The current state of the RTP flow between us and the remote party.
+    //    /// </summary>
+    //    public MediaStreamStatusEnum Direction { get; private set; } = MediaStreamStatusEnum.SendRecv;
+
+    //    public RTCRtpTransceiver(string mid)
+    //    {
+    //        MID = mid;
+    //    }
+
+    //    public void SetStreamStatus(MediaStreamStatusEnum direction)
+    //    {
+    //        Direction = direction;
+    //    }
+    //}
+
+    /// <summary>
     /// Represents a WebRTC RTCPeerConnection.
     /// </summary>
     /// <remarks>
@@ -112,6 +155,7 @@ namespace SIPSorcery.Net
         private const string ICE_OPTIONS = "ice2,trickle";          // Supported ICE options.
         private const string NORMAL_CLOSE_REASON = "normal";
         private const ushort SCTP_DEFAULT_PORT = 5000;
+        private const string UNKNOWN_DATACHANNEL_ERROR = "unknown";
 
         /// <summary>
         /// The period to wait for the SCTP association to complete before giving up.
@@ -130,8 +174,8 @@ namespace SIPSorcery.Net
 
         private RtpIceChannel _rtpIceChannel;
 
-        private readonly RTCDataChannelCollection _dataChannels;
-        public IReadOnlyCollection<RTCDataChannel> DataChannels => _dataChannels;
+        readonly RTCDataChannelCollection dataChannels;
+        public IReadOnlyCollection<RTCDataChannel> DataChannels => dataChannels;
 
         private Org.BouncyCastle.Tls.Certificate _dtlsCertificate;
         private Org.BouncyCastle.Crypto.AsymmetricKeyParameter _dtlsPrivateKey;
@@ -141,7 +185,7 @@ namespace SIPSorcery.Net
         private Task _iceInitiateGatheringTask;
         private new TaskCompletionSource<bool> _iceCompletedGatheringTask = new();
 
-        private Dictionary<string, int> _rtpExtensionsUsed; // < Uri, Id>
+        private Dictionary<String, int> _rtpExtensionsUsed; // < Uri, Id>
 
         /// <summary>
         /// Local ICE candidates that have been supplied directly by the application.
@@ -198,6 +242,19 @@ namespace SIPSorcery.Net
         public bool canTrickleIceCandidates { get => true; }
 
         private RTCConfiguration _configuration;
+
+        /// <summary>
+        /// The certificate being used to negotiate the DTLS handshake with the 
+        /// remote peer.
+        /// </summary>
+        //private RTCCertificate _currentCertificate;
+        //public RTCCertificate CurrentCertificate
+        //{
+        //    get
+        //    {
+        //        return _currentCertificate;
+        //    }
+        //}
 
         /// <summary>
         /// The fingerprint of the certificate being used to negotiate the DTLS handshake with the 
@@ -330,7 +387,7 @@ namespace SIPSorcery.Net
             base(true, true, true, configuration?.X_BindAddress, bindPort, portRange)
         {
             _crypto = new BcTlsCrypto();
-            _dataChannels = new RTCDataChannelCollection(useEvenIds: () => _dtlsHandle.IsClient);
+            dataChannels = new RTCDataChannelCollection(useEvenIds: () => _dtlsHandle.IsClient);
 
             if (_configuration != null &&
                _configuration.iceTransportPolicy == RTCIceTransportPolicy.relay &&
@@ -1315,7 +1372,7 @@ namespace SIPSorcery.Net
 
             // By this point the RTP ICE channel has already processed any STUN packets which means 
             // it's only necessary to separate RTP/RTCP from DTLS.
-            // Because DTLS packets can be fragmented and RTP/RTCP should never be, use the RTP/RTCP 
+            // Because DTLS packets can be fragmented and RTP/RTCP should never be use the RTP/RTCP 
             // prefix to distinguish.
 
             if (buffer.Length > 0)
@@ -1522,7 +1579,7 @@ namespace SIPSorcery.Net
                 sctp.RTCSctpAssociation.OnNewDataChannel += OnSctpAssociationNewDataChannel;
 
                 // Create new SCTP streams for any outstanding data channel requests.
-                foreach (var dataChannel in _dataChannels.ActivatePendingChannels())
+                foreach (var dataChannel in dataChannels.ActivatePendingChannels())
                 {
                     OpenDataChannel(dataChannel);
                 }
@@ -1542,7 +1599,7 @@ namespace SIPSorcery.Net
 
             dc.SendDcepAck();
 
-            if (_dataChannels.AddActiveChannel(dc))
+            if (dataChannels.AddActiveChannel(dc))
             {
                 ondatachannel?.Invoke(dc);
             }
@@ -1559,7 +1616,7 @@ namespace SIPSorcery.Net
         /// <param name="streamID">The ID of the stream corresponding to the acknowledged data channel.</param>
         private void OnSctpAssociationDataChannelOpened(ushort streamID)
         {
-            _dataChannels.TryGetChannel(streamID, out var dc);
+            dataChannels.TryGetChannel(streamID, out var dc);
 
             string label = dc != null ? dc.label : "<none>";
             logger.LogInformation($"WebRTC data channel opened label {label} and stream ID {streamID}.");
@@ -1579,7 +1636,7 @@ namespace SIPSorcery.Net
         /// </summary>
         private void OnSctpAssociationDataChunk(SctpDataFrame frame)
         {
-            if (_dataChannels.TryGetChannel(frame.StreamID, out var dc))
+            if (dataChannels.TryGetChannel(frame.StreamID, out var dc))
             {
                 dc.GotData(frame.StreamID, frame.StreamSeqNum, frame.PPID, frame.UserData);
             }
@@ -1669,7 +1726,7 @@ namespace SIPSorcery.Net
                         await InitialiseSctpAssociation(cancel).ConfigureAwait(false);
                     }
 
-                    _dataChannels.AddActiveChannel(channel);
+                    dataChannels.AddActiveChannel(channel);
                     OpenDataChannel(channel);
 
                     // Wait for the DCEP ACK from the remote peer.
@@ -1694,7 +1751,7 @@ namespace SIPSorcery.Net
                 // Data channels can be created prior to the SCTP transport being available.
                 // They will act as placeholders and then be opened once the SCTP transport 
                 // becomes available.
-                _dataChannels.AddPendingChannel(channel);
+                dataChannels.AddPendingChannel(channel);
                 return channel;
             }
         }

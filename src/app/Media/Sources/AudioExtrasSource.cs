@@ -28,7 +28,6 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
 namespace SIPSorcery.Media
@@ -130,8 +129,6 @@ namespace SIPSorcery.Media
 
         public event EncodedSampleDelegate OnAudioSourceEncodedSample;
 
-        public event Action<EncodedAudioFrame> OnAudioSourceEncodedFrameReady;
-
         /// <summary>
         /// This audio source DOES NOT generate raw samples. Subscribe to the encoded samples event
         /// to get samples ready for passing to the RTP transport layer.
@@ -224,6 +221,7 @@ namespace SIPSorcery.Media
 
                 return Task.CompletedTask;
             }
+
         }
 
         public Task PauseAudio()
@@ -567,11 +565,9 @@ namespace SIPSorcery.Media
 
                 byte[] encodedSample = _audioEncoder.EncodeAudio(pcm, _audioFormatManager.SelectedFormat);
 
-                uint rtpUnits = RtpTimestampExtensions.ToRtpUnits(_audioSamplePeriodMilliseconds, _audioFormatManager.SelectedFormat.RtpClockRate);
+                uint rtpUnits = (uint)(_audioFormatManager.SelectedFormat.RtpClockRate / 1000 * _audioSamplePeriodMilliseconds);
 
                 OnAudioSourceEncodedSample?.Invoke(rtpUnits, encodedSample);
-
-                OnAudioSourceEncodedFrameReady?.Invoke(new EncodedAudioFrame(-1, _audioFormatManager.SelectedFormat, (uint)_audioSamplePeriodMilliseconds, encodedSample));
             }
         }
 
