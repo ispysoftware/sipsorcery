@@ -13,13 +13,12 @@
 // BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
 //-----------------------------------------------------------------------------
 
+using Concentus;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
-using Concentus;
-using Concentus.Enums;
 using SIPSorceryMedia.Abstractions;
+using Concentus.Enums;
 
 namespace SIPSorcery.Media
 {
@@ -40,6 +39,7 @@ namespace SIPSorcery.Media
 
         private IOpusDecoder _opusDecoder;
         private IOpusEncoder _opusEncoder;
+        private byte[] _opusEncodedSampleBuffer;
 
         private List<AudioFormat> _linearFormats = new List<AudioFormat>
         {
@@ -52,14 +52,10 @@ namespace SIPSorcery.Media
 
         private List<AudioFormat> _supportedFormats = new List<AudioFormat>
         {
-            //new AudioFormat(111, "OPUS", OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1"),
             new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU),
             new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA),
             new AudioFormat(SDPWellKnownMediaFormatsEnum.G722),
             new AudioFormat(SDPWellKnownMediaFormatsEnum.G729),
-
-            // Need more testing befoer adding OPUS by default. 24 Dec 2024 AC.
-            //new AudioFormat(111, AudioCodecsEnum.OPUS.ToString(), OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1")
         };
 
         public List<AudioFormat> SupportedFormats
@@ -80,9 +76,9 @@ namespace SIPSorcery.Media
                 _supportedFormats.AddRange(_linearFormats);
             }
 
-            if(includeOpus)
+            if (includeOpus)
             {
-                _supportedFormats.Insert(0,new AudioFormat(111, "OPUS", OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1"));
+                _supportedFormats.Add(new AudioFormat(111, AudioCodecsEnum.OPUS.ToString(), OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1"));
             }
         }
 
@@ -93,161 +89,64 @@ namespace SIPSorcery.Media
 
         public byte[] EncodeAudio(short[] pcm, AudioFormat format)
         {
-            if (format.Codec == AudioCodecsEnum.G722)
+            switch(format.Codec)
             {
-                if (_g722Codec == null)
-                {
-                    _g722Codec = new G722Codec();
-                    _g722CodecState = new G722CodecState(G722_BIT_RATE, G722Flags.None);
-                }
-
-                int outputBufferSize = pcm.Length / 2;
-                byte[] encodedSample = new byte[outputBufferSize];
-                int res = _g722Codec.Encode(_g722CodecState, encodedSample, pcm, pcm.Length);
-
-                return encodedSample;
-            }
-            else if (format.Codec == AudioCodecsEnum.G729)
-            {
-                if (_g729Encoder == null)
-                {
-                    _g729Encoder = new G729Encoder();
-                }
-
-                byte[] pcmBytes = new byte[pcm.Length * sizeof(short)];
-                Buffer.BlockCopy(pcm, 0, pcmBytes, 0, pcmBytes.Length);
-                return _g729Encoder.Process(pcmBytes);
-            }
-            else if (format.Codec == AudioCodecsEnum.PCMA)
-            {
-                return pcm.Select(x => ALawEncoder.LinearToALawSample(x)).ToArray();
-            }
-            else if (format.Codec == AudioCodecsEnum.PCMU)
-            {
-                return pcm.Select(x => MuLawEncoder.LinearToMuLawSample(x)).ToArray();
-            }
-            else if (format.Codec == AudioCodecsEnum.L16)
-            {
-                // When netstandard2.1 can be used.
-                //return MemoryMarshal.Cast<short, byte>(pcm)
-
-                // Put on the wire in network byte order (big endian).
-                return pcm.SelectMany(x => new byte[] { (byte)(x >> 8), (byte)(x) }).ToArray();
-            }
-            else if (format.Codec == AudioCodecsEnum.PCM_S16LE)
-            {
-                // Put on the wire as little endian.
-                return pcm.SelectMany(x => new byte[] { (byte)(x), (byte)(x >> 8) }).ToArray();
-            }
-            else if (format.FormatName.ToUpper() == "OPUS")
-            {
-                var channelCount = format.ChannelCount > 0 ? format.ChannelCount : OPUS_CHANNELS;
-
-                if (_opusEncoder == null)
-                {
-                    Debug.WriteLine($"Creating Opus encoder: {format.ClockRate}Hz, {format.ChannelCount} channels");
-                    _opusEncoder = OpusCodecFactory.CreateEncoder(format.ClockRate, format.ChannelCount, OpusApplication.OPUS_APPLICATION_VOIP);
-                }
-
-                var audio = ResampleFrom8kHzMonoTo48kHzStereo(pcm);
-
-                int samplesPerChannel = audio.Length / format.ChannelCount;
-
-                // Debug the exact parameters
-                //Debug.WriteLine($"Opus Encode Parameters:");
-                //Debug.WriteLine($"  PCM total samples: {audio.Length}");
-                //Debug.WriteLine($"  Samples per channel: {samplesPerChannel}");
-                //Debug.WriteLine($"  Sample rate: {format.ClockRate}");
-                //Debug.WriteLine($"  Channels: {format.ChannelCount}");
-                //Debug.WriteLine($"  Expected 20ms samples at {format.ClockRate}Hz: {format.ClockRate * 20 / 1000}");
-
-                // Validate frame size
-                int expected20msSamples = (int)(format.ClockRate * 20 / 1000);
-                if (samplesPerChannel != expected20msSamples)
-                {
-                    Debug.WriteLine($"WARNING: Frame size mismatch! Got {samplesPerChannel}, expected {expected20msSamples}");
-                }
-
-                // Check for valid 16kHz frame sizes
-                var valid16kHzFrames = new[] { 80, 160, 240, 320, 480, 640, 960 }; // 5ms, 10ms, 15ms, 20ms, 30ms, 40ms, 60ms
-                if (!valid16kHzFrames.Contains(samplesPerChannel))
-                {
-                    Debug.WriteLine($"ERROR: Invalid frame size {samplesPerChannel} for 16kHz. Valid sizes: {string.Join(", ", valid16kHzFrames)}");
-                    return null;
-                }
-
-                byte[] encodedSample = new byte[4000];
-
-                //Debug.WriteLine($"Calling Opus.Encode with frame_size={samplesPerChannel}");
-
-                try
-                {
-                    int encodedLength = _opusEncoder.Encode(audio, samplesPerChannel, encodedSample, encodedSample.Length);
-
-                    //Debug.WriteLine($"Opus encode result: {encodedLength}");
-
-                    if (encodedLength < 0)
+                case AudioCodecsEnum.G722:
                     {
-                        var errorMessages = new Dictionary<int, string>
+                        if (_g722Codec == null)
                         {
-                            { -1, "OPUS_BAD_ARG: One or more invalid/out of range arguments" },
-                            { -2, "OPUS_BUFFER_TOO_SMALL: Output buffer too small" },
-                            { -3, "OPUS_INTERNAL_ERROR: Internal error" },
-                            { -4, "OPUS_INVALID_PACKET: Invalid packet" },
-                            { -5, "OPUS_UNIMPLEMENTED: Feature not implemented" },
-                            { -6, "OPUS_INVALID_STATE: Invalid state" },
-                            { -7, "OPUS_ALLOC_FAIL: Memory allocation failed" }
-                        };
+                            _g722Codec = new G722Codec();
+                            _g722CodecState = new G722CodecState(G722_BIT_RATE, G722Flags.None);
+                        }
 
-                        string errorMsg = errorMessages.ContainsKey(encodedLength)
-                            ? errorMessages[encodedLength]
-                            : $"Unknown error code: {encodedLength}";
+                        int outputBufferSize = pcm.Length / 2;
+                        byte[] encodedSample = new byte[outputBufferSize];
+                        int res = _g722Codec.Encode(_g722CodecState, encodedSample, pcm, pcm.Length);
 
-                        Debug.WriteLine($"Opus encoding error: {errorMsg}");
-                        return null;
+                        return encodedSample;
                     }
+                case AudioCodecsEnum.G729:
+                    {
+                        if (_g729Encoder == null)
+                        {
+                            _g729Encoder = new G729Encoder();
+                        }
 
-                    return encodedSample.Take(encodedLength).ToArray();
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Exception during Opus encoding: {ex.GetType().Name}: {ex.Message}");
-                    Debug.WriteLine($"Stack trace: {ex.StackTrace}");
-                    throw;
-                }
+                        byte[] pcmBytes = new byte[pcm.Length * sizeof(short)];
+                        Buffer.BlockCopy(pcm, 0, pcmBytes, 0, pcmBytes.Length);
+                        return _g729Encoder.Process(pcmBytes);
+                    }
+                case AudioCodecsEnum.PCMU:
+                    return pcm.Select(x => MuLawEncoder.LinearToMuLawSample(x)).ToArray();
+                case AudioCodecsEnum.PCMA:
+                    return pcm.Select(x => ALawEncoder.LinearToALawSample(x)).ToArray();
+                case AudioCodecsEnum.L16:
+                    // When netstandard2.1 can be used.
+                    //return MemoryMarshal.Cast<short, byte>(pcm)
+                    // Put on the wire in network byte order (big endian).
+                    return pcm.SelectMany(x => new byte[] { (byte)(x >> 8), (byte)(x) }).ToArray();
+                case AudioCodecsEnum.PCM_S16LE:
+                    // Put on the wire as little endian.
+                    return pcm.SelectMany(x => new byte[] { (byte)(x), (byte)(x >> 8) }).ToArray();
+
+                default:
+                case AudioCodecsEnum.OPUS:
+                    {
+                        var channelCount = format.ChannelCount > 0 ? format.ChannelCount : OPUS_CHANNELS;
+                        if (_opusEncoder == null)
+                        {
+                            _opusEncoder = OpusCodecFactory.CreateEncoder(format.ClockRate, channelCount, OpusApplication.OPUS_APPLICATION_VOIP);
+                            _opusEncodedSampleBuffer = new byte[OPUS_MAXIMUM_FRAME_SIZE * format.ChannelCount];
+                        }
+                        //OPUS for webrtc almost always uses 48khz stereo @ 20ms so ensure audio is in that format before encoding. pcm.Length should be 1920.
+                        int samplesPerChannel = pcm.Length / format.ChannelCount;
+                        int encodedLength = _opusEncoder.Encode(pcm, samplesPerChannel, _opusEncodedSampleBuffer, _opusEncodedSampleBuffer.Length);
+                        return _opusEncodedSampleBuffer.Take(encodedLength).ToArray();
+                    }
+                    break;
+                case AudioCodecsEnum.Unknown:
+                    throw new ApplicationException($"Audio format {format.Codec} cannot be encoded.");
             }
-            else
-            {
-                throw new ApplicationException($"Audio format {format.Codec} cannot be encoded.");
-            }
-        }
-
-        private short[] ResampleFrom8kHzMonoTo48kHzStereo(short[] input8kHzMono)
-        {
-            // Input: 160 mono samples (20ms at 8kHz)
-            // Output: 1920 stereo samples (960 per channel, 20ms at 48kHz)
-
-            var output = new short[input8kHzMono.Length * 6 * 2]; // 6x sample rate, 2x channels
-
-            for (int i = 0; i < input8kHzMono.Length; i++)
-            {
-                short currentSample = input8kHzMono[i];
-                short nextSample = (i < input8kHzMono.Length - 1) ? input8kHzMono[i + 1] : currentSample;
-
-                // Generate 6 interpolated samples for each input sample
-                for (int j = 0; j < 6; j++)
-                {
-                    short interpolatedSample = (short)(currentSample + (nextSample - currentSample) * j / 6);
-
-                    int outputIndex = (i * 6 + j) * 2; // *2 for stereo
-
-                    // Duplicate mono to both stereo channels
-                    output[outputIndex] = interpolatedSample;     // Left channel
-                    output[outputIndex + 1] = interpolatedSample; // Right channel
-                }
-            }
-
-            return output;
         }
 
         /// <summary>
@@ -348,5 +247,27 @@ namespace SIPSorcery.Media
             if (value > max) { return max; }
             return value;
         }
+
+        private bool _disposed = false;
+        public void Dispose()
+        {
+            DisposeInternal();
+            GC.SuppressFinalize(this);
+        }
+
+        ~AudioEncoder()
+        {
+            DisposeInternal();
+        }
+        private void DisposeInternal()
+        {
+            if (!_disposed)
+            {
+                _opusEncoder?.Dispose();
+                _opusDecoder?.Dispose();
+                _disposed = true;
+            }
+        }
+
     }
 }

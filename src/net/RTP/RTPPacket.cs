@@ -52,6 +52,13 @@ namespace SIPSorcery.Net
             packet.Slice(Header.Length, _payload.Length).CopyTo(_payload);
         }
 
+        public RTPPacket(byte[] packet)
+        {
+            Header = new RTPHeader(packet);
+            _payload = new byte[Header.PayloadSize];
+            Array.Copy(packet, Header.Length, _payload, 0, _payload.Length);
+        }
+
         public RTPPacket(ArraySegment<byte> packet, int srtpProtectionLength)
         {
             Header = new RTPHeader();
@@ -61,7 +68,7 @@ namespace SIPSorcery.Net
 
         public uint GetPayloadLength()
         {
-            return (uint)(_payload?.Length ?? _payloadSegment.Count + _srtpProtectionLength);
+            return (uint)(_payload?.Length ?? _payloadSegment.Count);
         }
 
         public byte[] GetPayloadBytes()
@@ -97,7 +104,7 @@ namespace SIPSorcery.Net
         public byte[] GetBytes()
         {
             byte[] header = Header.GetBytes();
-            byte[] packet = new byte[header.Length + GetPayloadLength()];
+            byte[] packet = new byte[header.Length + (_payload?.Length ?? _payloadSegment.Count) + _srtpProtectionLength];
 
             Array.Copy(header, packet, header.Length);
 
