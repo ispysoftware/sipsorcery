@@ -28,6 +28,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
 namespace SIPSorcery.Media
@@ -129,6 +130,8 @@ namespace SIPSorcery.Media
 
         public event EncodedSampleDelegate OnAudioSourceEncodedSample;
 
+        public event Action<EncodedAudioFrame> OnAudioSourceEncodedFrameReady;
+
         /// <summary>
         /// This audio source DOES NOT generate raw samples. Subscribe to the encoded samples event
         /// to get samples ready for passing to the RTP transport layer.
@@ -221,7 +224,6 @@ namespace SIPSorcery.Media
 
                 return Task.CompletedTask;
             }
-
         }
 
         public Task PauseAudio()
@@ -320,7 +322,8 @@ namespace SIPSorcery.Media
                     }
                     else if (_audioOpts.AudioSource == AudioSourcesEnum.Silence)
                     {
-                        _sendSampleTimer = new Timer(SendSilenceSample, null, 0, _audioSamplePeriodMilliseconds);
+                        _sendSampleTimer = new Timer(SendSilenceSample);
+                        _sendSampleTimer.Change(0, _audioSamplePeriodMilliseconds);
                     }
                     else if (_audioOpts.AudioSource == AudioSourcesEnum.PinkNoise ||
                          _audioOpts.AudioSource == AudioSourcesEnum.WhiteNoise ||
@@ -342,7 +345,8 @@ namespace SIPSorcery.Media
                                 break;
                         }
 
-                        _sendSampleTimer = new Timer(SendSignalGeneratorSample, null, 0, _audioSamplePeriodMilliseconds);
+                        _sendSampleTimer = new Timer(SendSignalGeneratorSample);
+                        _sendSampleTimer.Change(0, _audioSamplePeriodMilliseconds);
                     }
                     else if (_audioOpts.AudioSource == AudioSourcesEnum.Music)
                     {
@@ -363,7 +367,8 @@ namespace SIPSorcery.Media
                             _musicStreamReader = new BinaryReader(new FileStream(_audioOpts.MusicFile, FileMode.Open, FileAccess.Read));
                         }
 
-                        _sendSampleTimer = new Timer(SendMusicSample, null, 0, _audioSamplePeriodMilliseconds);
+                        _sendSampleTimer = new Timer(SendMusicSample);
+                        _sendSampleTimer.Change(0, _audioSamplePeriodMilliseconds);
                     }
                 }
             }
@@ -565,9 +570,11 @@ namespace SIPSorcery.Media
 
                 byte[] encodedSample = _audioEncoder.EncodeAudio(pcm, _audioFormatManager.SelectedFormat);
 
-                uint rtpUnits = (uint)(_audioFormatManager.SelectedFormat.RtpClockRate / 1000 * _audioSamplePeriodMilliseconds);
+                uint rtpUnits = RtpTimestampExtensions.ToRtpUnits(_audioSamplePeriodMilliseconds, _audioFormatManager.SelectedFormat.RtpClockRate);
 
                 OnAudioSourceEncodedSample?.Invoke(rtpUnits, encodedSample);
+
+                OnAudioSourceEncodedFrameReady?.Invoke(new EncodedAudioFrame(-1, _audioFormatManager.SelectedFormat, (uint)_audioSamplePeriodMilliseconds, encodedSample));
             }
         }
 

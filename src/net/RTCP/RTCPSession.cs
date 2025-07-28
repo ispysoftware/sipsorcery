@@ -208,7 +208,8 @@ namespace SIPSorcery.Net
 
                 // Schedule an immediate sender report.
                 var interval = GetNextRtcpInterval(RTCP_MINIMUM_REPORT_PERIOD_MILLISECONDS);
-                m_rtcpReportTimer = new Timer(SendReportTimerCallback, null, interval, Timeout.Infinite);
+            m_rtcpReportTimer = new Timer(SendReportTimerCallback);
+            m_rtcpReportTimer.Change(interval, Timeout.Infinite);
             }
         }
 
@@ -234,7 +235,7 @@ namespace SIPSorcery.Net
             LastActivityAt = DateTime.Now;
             IsTimedOut = false;
             PacketsReceivedCount++;
-            OctetsReceivedCount += (uint)rtpPacket.Payload.Length;
+            OctetsReceivedCount += rtpPacket.GetPayloadLength();
 
             if (m_receptionReport == null)
             {
@@ -272,7 +273,7 @@ namespace SIPSorcery.Net
             }
 
             PacketsSentCount++;
-            OctetsSentCount += (uint)rtpPacket.Payload.Length;
+            OctetsSentCount += rtpPacket.GetPayloadLength();
             LastSeqNum = rtpPacket.Header.SequenceNumber;
             LastRtpTimestampSent = rtpPacket.Header.Timestamp;
             LastNtpTimestampSent = DateTimeToNtpTimestamp(DateTime.Now);
@@ -362,7 +363,8 @@ namespace SIPSorcery.Net
                         var interval = GetNextRtcpInterval(RTCP_MINIMUM_REPORT_PERIOD_MILLISECONDS);
                         if (m_rtcpReportTimer == null)
                         {
-                            m_rtcpReportTimer = new Timer(SendReportTimerCallback, null, interval, Timeout.Infinite);
+                            m_rtcpReportTimer = new Timer(SendReportTimerCallback);
+                            m_rtcpReportTimer.Change(interval, Timeout.Infinite);
                         }
                         else
                         {
