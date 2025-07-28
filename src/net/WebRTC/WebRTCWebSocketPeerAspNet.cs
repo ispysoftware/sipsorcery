@@ -21,7 +21,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace SIPSorcery.Net;
 
@@ -41,6 +40,9 @@ public class WebRTCWebSocketPeerAspNet
     private readonly WebSocket _webSocket;
     private readonly RTCSdpType _peerRole;
     private readonly CancellationTokenSource _cts;
+
+    private bool _keepalive = false;
+    public TimeSpan KeepAliveTime = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Optional property to allow the peer connection SDP offer options to be set.
@@ -67,13 +69,22 @@ public class WebRTCWebSocketPeerAspNet
         WebSocket webSocket,
         Func<RTCConfiguration, Task<RTCPeerConnection>> createPeerConnection,
         RTCConfiguration peerConnectionConfig,
-        RTCSdpType peerRole)
+        RTCSdpType peerRole,
+        bool keepalive = false,
+        CancellationToken cancellationToken = default
+        )
     {
         _webSocket = webSocket;
         CreatePeerConnection = createPeerConnection;
         _peerConnectionConfig = peerConnectionConfig;
         _peerRole = peerRole;
         _cts = new CancellationTokenSource();
+        _keepalive = keepalive;
+
+        if (cancellationToken != default)
+        {
+            cancellationToken.Register(async () => await Close());
+        }
     }
 
     public async Task Run()
@@ -100,10 +111,28 @@ public class WebRTCWebSocketPeerAspNet
             if(state == RTCPeerConnectionState.connected)
             {
                 OnRTCPeerConnectionConnected?.Invoke();
+
+                _cts.Cancel();
             }
         };
 
-        await SendOffer();
+        if (_peerRole == RTCSdpType.offer)
+        {
+            await SendOffer();
+        }
+
+        if (_keepalive)
+        {
+            _ = Task.Run(async () =>
+            {
+                while (!_cts.Token.IsCancellationRequested && _webSocket.State == WebSocketState.Open)
+                {
+                    await Task.Delay(KeepAliveTime);
+                    _logger.LogTrace("Sending signaling channel keep alive 'ping'.");
+                    await SendMessageAsync("ping");
+                }
+            });
+        }
 
         // Start the web socket receiving loop.
         await StartReceivingAsync(_cts.Token);
@@ -151,6 +180,10 @@ public class WebRTCWebSocketPeerAspNet
                     await OnMessage(receiveResult, buffer);
                 }
             }
+        }
+        catch (System.OperationCanceledException)
+        {
+            _logger.LogDebug("{caller} stopped due to application cancellation request.", nameof(StartReceivingAsync));
         }
         catch (Exception ex)
         {
@@ -215,15 +248,12 @@ public class WebRTCWebSocketPeerAspNet
     {
         _logger.LogDebug("WebSocket connection closed.");
 
-        if (_pc != null)
+        // Cancel the receive loop.
+        if (!_cts.IsCancellationRequested)
         {
-            _pc.Close("Signaling WebSocket closed.");
+            _cts.Cancel();
         }
 
-        // Cancel the receive loop.
-        _cts.Cancel();
-
-        // Only close if it's still open
         if (_webSocket.State == WebSocketState.Open)
         {
             await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed by the server", CancellationToken.None);
