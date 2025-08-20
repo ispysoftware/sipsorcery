@@ -349,7 +349,7 @@ namespace SIPSorcery.Net
             PacketStatuses = new List<TWCCPacketStatus>();
             ushort seq = BaseSequenceNumber;
 
-            for (int i = 0; i < statusSymbols.Count; i++)
+            for (int i = 0; i < statusSymbols.Count && i < deltaValues.Count; i++)
             {
                 int? delta = deltaValues[i] == int.MinValue ? null :
                             (statusSymbols[i] == TWCCPacketStatusType.NotReceived ||
