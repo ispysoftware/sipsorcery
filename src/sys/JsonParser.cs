@@ -18,6 +18,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 using System.Text;
 
@@ -348,7 +349,7 @@ namespace TinyJson
         {
             // For .net8 this call needs to change to: RuntimeHelpers.GetUninitializedObject(type);
 
-            object instance = FormatterServices.GetUninitializedObject(type);
+            object instance = RuntimeHelpers.GetUninitializedObject(type);
 
             //The list is split into key/value pairs only, this means the split must be divisible by 2 to be valid JSON
             List<string> elems = Split(json);

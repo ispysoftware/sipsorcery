@@ -95,7 +95,7 @@ namespace SIPSorcery.Media
             else
             {
                 _testI420Buffer = new byte[TEST_PATTERN_WIDTH * TEST_PATTERN_HEIGHT * 3 / 2];
-                testPatternStm.Read(_testI420Buffer, 0, _testI420Buffer.Length);
+                testPatternStm.ReadExactly(_testI420Buffer, 0, _testI420Buffer.Length);
                 testPatternStm.Close();
                 _sendTestPatternTimer = new Timer(GenerateTestPattern, null, Timeout.Infinite, Timeout.Infinite);
                 _frameSpacing = 1000 / DEFAULT_FRAMES_PER_SECOND;

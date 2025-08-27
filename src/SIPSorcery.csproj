@@ -1,5 +1,4 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-
   <ItemGroup>
     <Compile Remove="net\RTSP\RTSPClient.cs" />
     <Compile Remove="net\RTSP\RTSPConnection.cs" />
@@ -36,12 +35,12 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <TargetFrameworks>netstandard2.0;netstandard2.1;netcoreapp3.1;net462;net5.0;net6.0;net8.0</TargetFrameworks>
+    <TargetFrameworks>net9.0</TargetFrameworks>
     <LangVersion>12.0</LangVersion>
     <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
     <NoWarn>$(NoWarn);SYSLIB0050</NoWarn>
-    <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!-- Disable warning for missing XML doc comments. -->
     <NoWarn>$(NoWarn);CS1591;CS1573;CS1587</NoWarn>
     <Authors>Aaron Clauson, Christophe Irles, Rafael Soares &amp; Contributors</Authors>

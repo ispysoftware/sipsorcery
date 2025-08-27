@@ -424,20 +424,21 @@ namespace SIPSorcery.Net
         {
             Pkcs12Store pkcs12Store = new Pkcs12StoreBuilder().Build();
             var certEntry = new X509CertificateEntry(bouncyCert);
-
             pkcs12Store.SetCertificateEntry(bouncyCert.SerialNumber.ToString(), certEntry);
             pkcs12Store.SetKeyEntry(bouncyCert.SerialNumber.ToString(),
                 new AsymmetricKeyEntry(keyPair.Private), new[] { certEntry });
 
             X509Certificate2 keyedCert;
-
             using (MemoryStream pfxStream = new MemoryStream())
             {
                 pkcs12Store.Save(pfxStream, new char[] { }, new SecureRandom());
                 pfxStream.Seek(0, SeekOrigin.Begin);
-                keyedCert = new X509Certificate2(pfxStream.ToArray(), string.Empty, X509KeyStorageFlags.Exportable);
-            }
 
+                keyedCert = X509CertificateLoader.LoadPkcs12(
+                    pfxStream.ToArray(),
+                    string.Empty,
+                    X509KeyStorageFlags.Exportable);
+            }
             return keyedCert;
         }
 

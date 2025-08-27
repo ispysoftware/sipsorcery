@@ -119,22 +119,31 @@ namespace SIPSorcery.SIP
             return sipChannels;
         }
 
-        private static X509Certificate2 LoadCertificate(string certificateType, string certifcateLocation, string certKeyPassword)
+        private static X509Certificate2 LoadCertificate(string certificateType, string certificateLocation, string certKeyPassword)
         {
             try
             {
-
                 if (certificateType == "file")
                 {
-                    var serverCertificate = new X509Certificate2(certifcateLocation, certKeyPassword);
-                    //DisplayCertificateChain(m_serverCertificate);
+                    X509Certificate2 serverCertificate;
+
+                    if (!string.IsNullOrEmpty(certKeyPassword))
+                    {
+                        serverCertificate = X509CertificateLoader.LoadPkcs12FromFile(certificateLocation, certKeyPassword);
+                    }
+                    else
+                    {
+                        serverCertificate = X509CertificateLoader.LoadCertificateFromFile(certificateLocation);
+                    }
+
+                    //DisplayCertificateChain(serverCertificate);
                     var verifyCert = serverCertificate.Verify();
                     logger.LogDebug("Server Certificate loaded from file, Subject={Subject}, valid={Valid}.", serverCertificate.Subject, verifyCert);
                     return serverCertificate;
                 }
 
                 var store = (certificateType == "machinestore") ? StoreLocation.LocalMachine : StoreLocation.CurrentUser;
-                return Crypto.LoadCertificate(store, certifcateLocation, true);
+                return Crypto.LoadCertificate(store, certificateLocation, true);
             }
             catch (Exception excp)
             {
