@@ -15,19 +15,17 @@
 
 using System;
 using System.Collections;
-using Microsoft.Extensions.Logging;
-using Org.BouncyCastle.Tls;
-using Org.BouncyCastle.Security;
-using Org.BouncyCastle.Utilities;
-using SIPSorcery.Sys;
 using System.Collections.Generic;
+using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Crypto;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.Tls;
 using Org.BouncyCastle.Tls.Crypto;
+using SIPSorcery.Sys;
 
 namespace SIPSorcery.Net
 {
-    internal class DtlsSrtpTlsAuthentication
-            : TlsAuthentication
+    internal class DtlsSrtpTlsAuthentication : TlsAuthentication
     {
         private readonly DtlsSrtpClient mClient;
         private readonly TlsContext mContext;
@@ -40,23 +38,17 @@ namespace SIPSorcery.Net
 
         public virtual void NotifyServerCertificate(TlsServerCertificate serverCertificate)
         {
-            //Console.WriteLine("DTLS client received server certificate chain of length " + chain.Length);
             mClient.ServerCertificate = serverCertificate;
         }
 
         public virtual TlsCredentials GetClientCredentials(CertificateRequest certificateRequest)
         {
-            short[] certificateTypes = certificateRequest.CertificateTypes;
-            if (certificateTypes == null || !Arrays.Contains(certificateTypes, ClientCertificateType.rsa_sign) || !Arrays.Contains(certificateTypes, ClientCertificateType.ecdsa_sign))
-            {
-                return null;
-            }
+            return DtlsUtils.LoadSignerCredentials(mContext, certificateRequest.SupportedSignatureAlgorithms, mClient.mCertificateChain, mClient.mPrivateKey);
+        }
 
-            return DtlsUtils.LoadSignerCredentials(mContext,
-                certificateRequest.SupportedSignatureAlgorithms,
-                SignatureAlgorithm.ecdsa,
-                mClient.mCertificateChain,
-                mClient.mPrivateKey);
+        public TlsCredentials GetClientCredentials(TlsContext context, CertificateRequest certificateRequest)
+        {
+            return GetClientCredentials(certificateRequest);
         }
     };
 
@@ -66,6 +58,7 @@ namespace SIPSorcery.Net
 
         internal Certificate mCertificateChain = null;
         internal AsymmetricKeyParameter mPrivateKey = null;
+        bool mIsEcdsaCertificate = false;
 
         internal TlsClientContext TlsContext
         {
@@ -88,7 +81,6 @@ namespace SIPSorcery.Net
         private byte[] srtpMasterServerKey;
         private byte[] srtpMasterClientSalt;
         private byte[] srtpMasterServerSalt;
-        private byte[] masterSecret = null;
 
         // Policies
         private SrtpPolicy srtpPolicy;
@@ -102,15 +94,26 @@ namespace SIPSorcery.Net
         /// </summary>
         public event Action<AlertLevelsEnum, AlertTypesEnum, string> OnAlert;
 
+        public DtlsSrtpClient(TlsCrypto crypto)
+            : this(crypto, null, null, null) { }
 
-        public DtlsSrtpClient(TlsCrypto crypto, Certificate certificateChain, Org.BouncyCastle.Crypto.AsymmetricKeyParameter privateKey) :
-            this(crypto, certificateChain, privateKey, null)
+        public DtlsSrtpClient(TlsCrypto crypto, System.Security.Cryptography.X509Certificates.X509Certificate2 certificate)
+            : this(crypto, DtlsUtils.LoadCertificateChain(crypto, certificate), DtlsUtils.LoadPrivateKeyResource(certificate)) { }
+
+        public DtlsSrtpClient(TlsCrypto crypto, string certificatePath, string keyPath)
+            : this(crypto, new string[] { certificatePath }, keyPath) { }
+
+        public DtlsSrtpClient(TlsCrypto crypto, string[] certificatesPath, string keyPath)
+            : this(crypto, DtlsUtils.LoadCertificateChain(crypto, certificatesPath), DtlsUtils.LoadPrivateKeyResource(keyPath)) { }
+
+        public DtlsSrtpClient(TlsCrypto crypto, Certificate certificateChain, AsymmetricKeyParameter privateKey)
+            : this(crypto, certificateChain, privateKey, null) { }
+
+        public DtlsSrtpClient(TlsCrypto crypto, UseSrtpData clientSrtpData)
+            : this(crypto, null, null, clientSrtpData) { }
+
+        public DtlsSrtpClient(TlsCrypto crypto, Certificate certificateChain, AsymmetricKeyParameter privateKey, UseSrtpData clientSrtpData) : base(crypto)
         {
-        }
-
-        public DtlsSrtpClient(TlsCrypto crypto, Certificate certificateChain, Org.BouncyCastle.Crypto.AsymmetricKeyParameter privateKey, UseSrtpData clientSrtpData) : base(crypto)
-        {
-
             if (certificateChain == null && privateKey == null)
             {
                 (certificateChain, privateKey) = DtlsUtils.CreateSelfSignedTlsCert(crypto);
@@ -135,11 +138,37 @@ namespace SIPSorcery.Net
             //Generate FingerPrint
             var certificate = mCertificateChain.GetCertificateAt(0);
             Fingerprint = certificate != null ? DtlsUtils.Fingerprint(certificate) : null;
+
+            //TODO: We should be able to support both ECDSA and RSA schemes, search in the certificate chain if both are supported and not just in the first one.
+            // Check if the certificate is ECDSA or RSA based on the OID
+            this.mIsEcdsaCertificate = certificate.SigAlgOid.StartsWith("1.2.840.10045.4.3"); // OID prefix for ECDSA
         }
 
-        public DtlsSrtpClient(TlsCrypto crypto, UseSrtpData clientSrtpData) : this(crypto, null, null, clientSrtpData)
-        { }
+        public override void Init(TlsClientContext context)
+        {
+            base.Init(context);
 
+            if (this.mIsEcdsaCertificate)
+            {
+                m_cipherSuites = new int[]
+                {
+                    CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,            // 0xC02B
+                    CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,               // 0xC009
+                    CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,               // 0xC00A
+                    CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,      // 0xCCA9
+                 };
+            }
+            else
+            {
+                m_cipherSuites = new int[]
+                {
+                    CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,              // 0xC02F
+                    CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,        // 0xCCA8
+                    CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,                 // 0xC013
+                    CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA                  // 0xC014
+                 };
+            }
+        }
 
         public override IDictionary<int, byte[]> GetClientExtensions()
         {
@@ -227,10 +256,6 @@ namespace SIPSorcery.Net
 
             //Prepare Srtp Keys (we must to it here because master key will be cleared after that)
             PrepareSrtpSharedSecret();
-
-            //Copy master Secret (will be inaccessible after this call)
-            masterSecret = new byte[m_context.SecurityParameters.MasterSecret != null ? m_context.SecurityParameters.MasterSecret.Length : 0];
-            Buffer.BlockCopy(m_context.SecurityParameters.MasterSecret.Extract(), 0, masterSecret, 0, masterSecret.Length);
         }
 
         public bool IsClient()
@@ -352,6 +377,16 @@ namespace SIPSorcery.Net
             Buffer.BlockCopy(sharedSecret, (2 * keyLen + saltLen), srtpMasterServerSalt, 0, saltLen);
         }
 
+        protected override ProtocolVersion[] GetSupportedVersions()
+        {
+            return new ProtocolVersion[]
+            {
+                ProtocolVersion.DTLSv10,
+                ProtocolVersion.DTLSv12
+                //TODO: Add support for newer CipherSuites in order for us to support the newer ProtocolVersion.DTLSv13.
+            };
+        }
+
         public override TlsSession GetSessionToResume()
         {
             return this.mSession;
@@ -369,16 +404,13 @@ namespace SIPSorcery.Net
                 description += cause;
             }
 
-            string alertMessage = $"{AlertLevel.GetText(alertLevel)}, {AlertDescription.GetText(alertDescription)}";
-            alertMessage += !string.IsNullOrEmpty(description) ? $", {description}." : ".";
-
-            if (alertDescription == (byte)AlertTypesEnum.close_notify)
+            if (alertDescription == AlertTypesEnum.close_notify.GetHashCode())
             {
-                logger.LogDebug($"DTLS client raised close notification: {alertMessage}");
+                logger.LogDebug("DTLS client raised close notification: {AlertMessage}", $"{AlertLevel.GetText(alertLevel)}, {AlertDescription.GetText(alertDescription)}{(!string.IsNullOrEmpty(description) ? $", {description}." : ".")}");
             }
             else
             {
-                logger.LogWarning($"DTLS client raised unexpected alert: {alertMessage}");
+                logger.LogWarning("DTLS client raised unexpected alert: {AlertMessage}", $"{AlertLevel.GetText(alertLevel)}, {AlertDescription.GetText(alertDescription)}{(!string.IsNullOrEmpty(description) ? $", {description}." : ".")}");
             }
         }
 
@@ -390,15 +422,6 @@ namespace SIPSorcery.Net
         public Certificate GetRemoteCertificate()
         {
             return ServerCertificate.Certificate;
-        }
-
-        protected override ProtocolVersion[] GetSupportedVersions()
-        {
-            return new ProtocolVersion[]
-            {
-                ProtocolVersion.DTLSv10,
-                ProtocolVersion.DTLSv12,
-            };
         }
 
         public override void NotifyAlertReceived(short alertLevel, short alertDescription)
@@ -420,11 +443,11 @@ namespace SIPSorcery.Net
 
             if (alertType == AlertTypesEnum.close_notify)
             {
-                logger.LogDebug($"DTLS client received close notification: {AlertLevel.GetText(alertLevel)}, {description}.");
+                logger.LogDebug("DTLS client received close notification: {AlertLevel}, {Description}.", AlertLevel.GetText(alertLevel), description);
             }
             else
             {
-                logger.LogWarning($"DTLS client received unexpected alert: {AlertLevel.GetText(alertLevel)}, {description}.");
+                logger.LogWarning("DTLS client received unexpected alert: {AlertLevel}, {Description}.", AlertLevel.GetText(alertLevel), description);
             }
 
             OnAlert?.Invoke(level, alertType, description);
