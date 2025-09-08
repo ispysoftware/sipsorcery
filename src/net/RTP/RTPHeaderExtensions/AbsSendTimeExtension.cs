@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using SIPSorcery.Net;
 
 namespace SIPSorcery.Net
@@ -9,21 +10,17 @@ namespace SIPSorcery.Net
     public class AbsSendTimeExtension: RTPHeaderExtension
     {
         public const string RTP_HEADER_EXTENSION_URI = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+
+        public static readonly string[] SUPPORTED_URIS =
+        {
+            RTP_HEADER_EXTENSION_URI,
+            "urn:ietf:params:rtp-hdrext:sdes:abs-send-time"
+        };
+
         internal const int RTP_HEADER_EXTENSION_SIZE = 3;
 
-        public AbsSendTimeExtension(int id): base(id, RTP_HEADER_EXTENSION_URI, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte)
+        public AbsSendTimeExtension(int id): base(id, RTP_HEADER_EXTENSION_URI, SUPPORTED_URIS, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte)
         {
-        }
-
-        public override bool MatchesExtension(string uri)
-        {
-            switch (uri.ToLower())
-            {
-                case RTP_HEADER_EXTENSION_URI:
-                case "urn:ietf:params:rtp-hdrext:sdes:abs-send-time": //official urn registered with IANA
-                    return true;
-            }
-            return false;
         }
 
         public override void Set(Object value)

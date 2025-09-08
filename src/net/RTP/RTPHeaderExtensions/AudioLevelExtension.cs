@@ -34,11 +34,17 @@ namespace SIPSorcery.Net
         };
 
         public const string RTP_HEADER_EXTENSION_URI = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+
+        public static readonly string[] SUPPORTED_URIS = 
+        {
+            RTP_HEADER_EXTENSION_URI
+        };
+
         internal const int RTP_HEADER_EXTENSION_SIZE = 1;
 
         private AudioLevel _audioLevel;
 
-        public AudioLevelExtension(int id) : base(id, RTP_HEADER_EXTENSION_URI, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte, Net.SDPMediaTypesEnum.audio)
+        public AudioLevelExtension(int id) : base(id, RTP_HEADER_EXTENSION_URI, SUPPORTED_URIS, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte, Net.SDPMediaTypesEnum.audio)
         {
             _audioLevel = new AudioLevel()
             {
