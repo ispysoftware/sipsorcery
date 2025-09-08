@@ -29,11 +29,19 @@ namespace SIPSorcery.Net
     /// </summary>
     public class TransportWideCCExtension : RTPHeaderExtension
     {
-        //
-
         public const string RTP_HEADER_EXTENSION_URI = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
-        //public const string RTP_HEADER_EXTENSION_URI_ALT = "http://www.webrtc.org/experiments/rtp-hdrext/transport-wide-cc-02";
 
+        public override bool MatchesExtension(string uri)
+        {
+            switch(uri.ToLower())
+            {
+                case RTP_HEADER_EXTENSION_URI:
+                case "urn:ietf:params:rtp-hdrext:transport-wide-cc": //official urn registered with IANA
+                case "http://www.webrtc.org/experiments/rtp-hdrext/transport-wide-cc-02":
+                    return true;
+            }
+            return false;
+        }
 
         internal const int RTP_HEADER_EXTENSION_SIZE = 2; // TWCC payload: 2 bytes for sequence number.
 
@@ -48,6 +56,16 @@ namespace SIPSorcery.Net
         /// <param name="id">The negotiated header extension id.</param>
         public TransportWideCCExtension(int id)
             : base(id, RTP_HEADER_EXTENSION_URI, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte)
+        {
+        }
+
+        /// <summary>
+        /// Constructs a TWCC header extension with the negotiated extension id.
+        /// </summary>
+        /// <param name="id">The negotiated header extension id.</param>
+        /// <param name="uri">The URI to use in the sdp.</param>
+        public TransportWideCCExtension(int id, string uri)
+            : base(id, uri, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte)
         {
         }
 

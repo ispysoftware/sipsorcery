@@ -15,6 +15,17 @@ namespace SIPSorcery.Net
         {
         }
 
+        public override bool MatchesExtension(string uri)
+        {
+            switch (uri.ToLower())
+            {
+                case RTP_HEADER_EXTENSION_URI:
+                case "urn:ietf:params:rtp-hdrext:sdes:abs-send-time": //official urn registered with IANA
+                    return true;
+            }
+            return false;
+        }
+
         public override void Set(Object value)
         {
             // Nothing to do here 
@@ -47,10 +58,27 @@ namespace SIPSorcery.Net
             return AbsSendTime(Id, ExtensionSize, DateTimeOffset.Now);
         }
 
+        
         public override Object Unmarshal(RTPHeader header, byte[] data)
         {
-            var ntpTimestamp = GetUlong(data);
-            return new TimestampPair() { NtpTimestamp = ntpTimestamp.HasValue ? ntpTimestamp.Value : 0, RtpTimestamp = header.Timestamp };
+            // Check for the correct payload size
+            if (data == null || data.Length != RTP_HEADER_EXTENSION_SIZE)
+            {
+                return null;
+            }
+
+            // Combine the 3 bytes into a 64-bit value for calculation
+            ulong receivedAbsSendTime = ((ulong)data[0] << 16) | ((ulong)data[1] << 8) | (ulong)data[2];
+
+            // The receivedAbsSendTime is the 24-bit value from the sender.
+            // The receiver's job is to use this value to get an estimated
+            // NTP timestamp for synchronization. This is often done by taking
+            // the local NTP time and replacing its high bits with the received 
+            // 24-bit value.
+
+            // For simplicity, let's just return the value as part of the TimestampPair.
+            // The actual synchronization logic would be handled by the caller.
+            return new TimestampPair() { NtpTimestamp = receivedAbsSendTime, RtpTimestamp = header.Timestamp };
         }
 
         // DateTimeOffset.UnixEpoch only available in newer target frameworks

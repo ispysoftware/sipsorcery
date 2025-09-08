@@ -32,8 +32,7 @@ namespace SIPSorcery.Net
                     break;
 
                 case TransportWideCCExtension.RTP_HEADER_EXTENSION_URI:
-                //case TransportWideCCExtension.RTP_HEADER_EXTENSION_URI_ALT:
-                    result = new TransportWideCCExtension(id);
+                    result = new TransportWideCCExtension(id, uri);
                     break;
             }
 
@@ -43,6 +42,17 @@ namespace SIPSorcery.Net
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Checks if the URI provided matches the URI of this extension
+        /// Override this method if the extension can have multiple URIs (for example TransportWideCCExtension)
+        /// </summary>
+        /// <param name="uri"></param>
+        /// <returns></returns>
+        public virtual bool MatchesExtension(string uri)
+        {
+            return Uri.Equals(uri, StringComparison.InvariantCultureIgnoreCase);
         }
 
         /// <summary>
@@ -73,7 +83,7 @@ namespace SIPSorcery.Net
         public int Id { get; internal set; }
 
         // Uri
-        public string Uri { get; }
+        public string Uri { get; set; }
 
         public int ExtensionSize { get; }
 

@@ -374,7 +374,7 @@ namespace SIPSorcery.Net
                     clockRate = 16000;
                 }
 
-                return new AudioFormat(ID, name, clockRate, rtpClockRate, channels, Fmtp);
+                return new AudioFormat(ID, name?.ToUpper(), clockRate, rtpClockRate, channels, Fmtp);
             }
             else if (ID < DYNAMIC_ID_MIN
                 && Enum.TryParse<SDPWellKnownMediaFormatsEnum>(Name(), out var wellKnownFormat)
@@ -398,7 +398,7 @@ namespace SIPSorcery.Net
             // But we don't currently support any of the well known video types any way.
             if (TryParseRtpmap(Rtpmap, out var name, out int clockRate, out _))
             {
-                return new VideoFormat(ID, name, clockRate, Fmtp);
+                return new VideoFormat(ID, name?.ToUpper(), clockRate, Fmtp);
             }
             else
             {
