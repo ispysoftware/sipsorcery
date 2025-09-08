@@ -996,11 +996,12 @@ namespace SIPSorcery.Net
                         {
                             foreach (var remoteExtension in remoteHeaderExtensions)
                             {
-                                var localExtension = localHeaderExtensions.FirstOrDefault(ext => ext.Uri == remoteExtension.Uri);
+                                var localExtension = localHeaderExtensions.FirstOrDefault(ext => ext.SupportsExtension(remoteExtension.Uri));
                                 if ((localExtension != null) && _rtpExtensionsUsed.ContainsKey(remoteExtension.Uri))
                                 {
                                     // We must ensure to use same Id by extension
                                     localExtension.Id = _rtpExtensionsUsed[remoteExtension.Uri];
+                                    localExtension.Uri = remoteExtension.Uri; // Keep same Uri as remote
 
                                     logger.LogDebug("[createAnswer] - {Media}:[{MediaID}] - Add HeaderExtensions:[{Id} - {Uri}]", ann.Media, ann.MediaID, localExtension.Id, localExtension.Uri);
                                     ann.HeaderExtensions.Add(localExtension.Id, localExtension);
@@ -1020,11 +1021,12 @@ namespace SIPSorcery.Net
                         {
                             foreach (var remoteExtension in remoteHeaderExtensions)
                             {
-                                var localExtension = localHeaderExtensions.FirstOrDefault(ext => ext.Uri == remoteExtension.Uri);
+                                var localExtension = localHeaderExtensions.FirstOrDefault(ext => ext.SupportsExtension(remoteExtension.Uri));
                                 if ((localExtension != null) && _rtpExtensionsUsed.ContainsKey(remoteExtension.Uri))
                                 {
                                     // We must ensure to use same Id by extension
                                     localExtension.Id = _rtpExtensionsUsed[remoteExtension.Uri];
+                                    localExtension.Uri = remoteExtension.Uri; // Keep same Uri as remote
 
                                     logger.LogDebug("[createAnswer] - {Media}:[{MediaID}] - Add HeaderExtensions:[{Id} - {Uri}]", ann.Media, ann.MediaID, localExtension.Id, localExtension.Uri);
                                     ann.HeaderExtensions.Add(localExtension.Id, localExtension);

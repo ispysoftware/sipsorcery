@@ -52,16 +52,23 @@ namespace SIPSorcery.Net
         }
 
         public const string RTP_HEADER_EXTENSION_URI = "urn:3gpp:video-orientation";
+
+        public static readonly string[] SUPPORTED_URIS =
+        {
+            RTP_HEADER_EXTENSION_URI
+        };
+
         internal const int RTP_HEADER_EXTENSION_SIZE = 1;
 
         private byte _cvo_byte;
         private CVO _cvo;
 
-        public CVOExtension(int id) : base(id, RTP_HEADER_EXTENSION_URI, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte, Net.SDPMediaTypesEnum.video)
+        public CVOExtension(int id) : base(id, RTP_HEADER_EXTENSION_URI, SUPPORTED_URIS, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte, Net.SDPMediaTypesEnum.video)
         {
             _cvo_byte = 0;
             _cvo = new CVO();
         }
+
 
         /// <summary>
         /// To set video rotation

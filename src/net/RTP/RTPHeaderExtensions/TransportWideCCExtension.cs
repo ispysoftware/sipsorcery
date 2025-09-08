@@ -8,7 +8,7 @@
  *   It provides functionality to marshal and unmarshal the TWCC header extension.
  * 
  * Author:        Sean Tearney
- * Date:          2025-02-22
+ * Date:          2025-09-08
  * 
  * License:       BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
  * 
@@ -29,11 +29,15 @@ namespace SIPSorcery.Net
     /// </summary>
     public class TransportWideCCExtension : RTPHeaderExtension
     {
-        //
-
         public const string RTP_HEADER_EXTENSION_URI = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
-        //public const string RTP_HEADER_EXTENSION_URI_ALT = "http://www.webrtc.org/experiments/rtp-hdrext/transport-wide-cc-02";
 
+        public static readonly string[] SUPPORTED_URIS =
+        {
+            RTP_HEADER_EXTENSION_URI,
+            "urn:ietf:params:rtp-hdrext:transport-wide-cc",
+            "http://www.webrtc.org/experiments/rtp-hdrext/transport-wide-cc-02"
+
+        };
 
         internal const int RTP_HEADER_EXTENSION_SIZE = 2; // TWCC payload: 2 bytes for sequence number.
 
@@ -47,7 +51,7 @@ namespace SIPSorcery.Net
         /// </summary>
         /// <param name="id">The negotiated header extension id.</param>
         public TransportWideCCExtension(int id)
-            : base(id, RTP_HEADER_EXTENSION_URI, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte)
+            : base(id, RTP_HEADER_EXTENSION_URI, SUPPORTED_URIS, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte)
         {
         }
 

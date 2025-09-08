@@ -17,28 +17,26 @@ namespace SIPSorcery.Net
         public static RTPHeaderExtension GetRTPHeaderExtension(int id, string uri, SDPMediaTypesEnum media)
         {
             RTPHeaderExtension result = null;
-            switch (uri)
+            if (AbsSendTimeExtension.SUPPORTED_URIS.Contains(uri, StringComparer.InvariantCultureIgnoreCase))
             {
-                case AbsSendTimeExtension.RTP_HEADER_EXTENSION_URI:
-                    result = new AbsSendTimeExtension(id);
-                    break;
-
-                case CVOExtension.RTP_HEADER_EXTENSION_URI:
-                    result = new CVOExtension(id);
-                    break;
-
-                case AudioLevelExtension.RTP_HEADER_EXTENSION_URI:
-                    result = new AudioLevelExtension(id);
-                    break;
-
-                case TransportWideCCExtension.RTP_HEADER_EXTENSION_URI:
-                //case TransportWideCCExtension.RTP_HEADER_EXTENSION_URI_ALT:
-                    result = new TransportWideCCExtension(id);
-                    break;
+                result = new AbsSendTimeExtension(id);
+            }
+            else if (CVOExtension.SUPPORTED_URIS.Contains(uri, StringComparer.InvariantCultureIgnoreCase))
+            {
+                result = new CVOExtension(id);
+            }
+            else if (AudioLevelExtension.SUPPORTED_URIS.Contains(uri, StringComparer.InvariantCultureIgnoreCase))
+            {
+                result = new AudioLevelExtension(id);
+            }
+            else if (TransportWideCCExtension.SUPPORTED_URIS.Contains(uri, StringComparer.InvariantCultureIgnoreCase))
+            {
+                result = new TransportWideCCExtension(id);
             }
 
-            if ( (result != null) &&  result.IsMediaSupported(media) )
+            if ((result != null) && result.IsMediaSupported(media))
             {
+                result.Uri = uri;
                 return result;
             }
 
@@ -46,17 +44,29 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
+        /// Returns true if the URI is supported by this extension
+        /// </summary>
+        /// <param name="uri"></param>
+        /// <returns></returns>
+        public bool SupportsExtension(string uri)
+        {
+            return SupportedURIs.Contains(uri, StringComparer.InvariantCultureIgnoreCase);
+        }
+
+        /// <summary>
         /// To create a RTP Header Extension
         /// </summary>
         /// <param name="id"><see cref="int"/> Id / extmap</param>
         /// <param name="uri"><see cref="String"/>uri</param>
+        /// <param name="supportedURIs"><see cref="String"/> An array of supported RTP Header Extension URIs.</param>
         /// <param name="type"><see cref="RTPHeaderExtension"/>type (one or two bytes)</param>
         /// <param name="medias"><see cref="SDPMediaTypesEnum"/>media(s) supported by this extension - set null/empty if all medias are supported</param>
-        public RTPHeaderExtension(int id, string uri, int extensionSize, RTPHeaderExtensionType type, params SDPMediaTypesEnum[] medias )
+        public RTPHeaderExtension(int id, string uri, string[] supportedURIs, int extensionSize, RTPHeaderExtensionType type, params SDPMediaTypesEnum[] medias)
         {
             Id = id;
             Uri = uri;
             ExtensionSize = extensionSize;
+            SupportedURIs = supportedURIs;
             Type = type;
 
             if (medias != null)
@@ -73,7 +83,10 @@ namespace SIPSorcery.Net
         public int Id { get; internal set; }
 
         // Uri
-        public string Uri { get; }
+        public string Uri { get; set; }
+
+        //Supported URIs for this extension
+        public string[] SupportedURIs { get; protected set; }
 
         public int ExtensionSize { get; }
 
