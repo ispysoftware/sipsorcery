@@ -89,10 +89,16 @@ namespace SIPSorcery.Net
 
         internal struct Timestamp
         {
-            readonly long ticks;
-            Timestamp(long ticks) => this.ticks = ticks;
-            public readonly double Milliseconds => ticks / (Stopwatch.Frequency / 1000.0);
+            public readonly long Ticks;
+            Timestamp(long ticks) => this.Ticks = ticks;
+            public readonly double Milliseconds => Ticks / (Stopwatch.Frequency / 1000.0);
             public static Timestamp Now => new(Stopwatch.GetTimestamp());
+
+            public static TimeSpan operator -(Timestamp a, Timestamp b)
+            {
+                var tickDifference = a.Ticks - b.Ticks;
+                return new TimeSpan(tickDifference * TimeSpan.TicksPerSecond / Stopwatch.Frequency);
+            }
         }
         // These properties are used by the data sender.
         internal Timestamp LastSentAt;

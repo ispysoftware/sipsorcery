@@ -33,6 +33,7 @@
 //-----------------------------------------------------------------------------
 
 using System;
+using System.Threading.Tasks;
 
 namespace SIPSorcery.Net
 {
