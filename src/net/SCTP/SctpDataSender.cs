@@ -44,6 +44,7 @@ namespace SIPSorcery.Net
         private bool _hasRoundTripTime;
         private double _smoothedRoundTripTime;
         private double _roundTripTimeVariation;
+
         private readonly SortedDictionary<long, List<uint>> _retransmitQueue = new SortedDictionary<long, List<uint>>();
 
         private double _rtoAlpha = 0.125;
@@ -94,6 +95,10 @@ namespace SIPSorcery.Net
 
         public void GotSack(SctpChunkView sack)
         {
+            // The lock here is still coarse, which can be a performance bottleneck.
+            // However, the state variables are highly coupled (e.g., CumulativeTsnAck affects
+            // congestion window, RTT, and fast recovery). A granular lock redesign is complex and
+            // risky.
             lock (_syncLock)
             {
                 if (_inRetransmitMode.IsOn() && SctpDataReceiver.IsNewer(_cumulativeAckTSN, sack.CumulativeTsnAck))
@@ -126,7 +131,6 @@ namespace SIPSorcery.Net
             _senderMre.Set();
         }
 
-        // DEFINITIVE FIX: Reverted to a simple, correct loop logic to prevent state corruption.
         private void RemoveAckedUnconfirmedChunks(uint sackTSN)
         {
             if (SctpDataReceiver.IsNewer(_cumulativeAckTSN, sackTSN))
@@ -140,6 +144,7 @@ namespace SIPSorcery.Net
             }
         }
 
+        // This method remains within the _syncLock of GotSack, so it's safe.
         private void ProcessGapReports(ReadOnlySpan<byte> gapAckBlocksBytes)
         {
             uint highestTsnNewlyAcked = _cumulativeAckTSN;
@@ -183,6 +188,8 @@ namespace SIPSorcery.Net
             }
         }
 
+        // Prevent corruption of the non-thread-safe _retransmitQueue
+        // by ensuring any modification to it is synchronized.
         private bool RemoveUnconfirmedChunk(uint tsn)
         {
             if (_unconfirmedChunks.TryRemove(tsn, out var chunk))
@@ -190,8 +197,12 @@ namespace SIPSorcery.Net
                 if (_retransmitQueue.TryGetValue(chunk.LastSentAt.Ticks, out var tsnList))
                 {
                     tsnList.Remove(tsn);
-                    if (tsnList.Count == 0) _retransmitQueue.Remove(chunk.LastSentAt.Ticks);
+                    if (tsnList.Count == 0)
+                    {
+                        _retransmitQueue.Remove(chunk.LastSentAt.Ticks);
+                    }
                 }
+                
                 Interlocked.Add(ref _outstandingBytesCounter, -chunk.UserDataLength);
                 _missingChunks.TryRemove(tsn, out _);
                 chunk.Dispose();
@@ -210,9 +221,12 @@ namespace SIPSorcery.Net
             {
                 int offset = i * _defaultMTU;
                 int payloadLength = Math.Min(_defaultMTU, data.Length - offset);
-                var dataChunk = new SctpDataChunk(false, i == 0, i == chunkCount - 1, unchecked((uint)Interlocked.Increment(ref tsn)) - 1, streamID, seqnum, ppid, data.Slice(offset, payloadLength));
 
-                // Use a loop with TryAdd to prevent deadlocks if the consumer thread stalls.
+                // Interlocked.Increment returns the *new* value, so we subtract 1 to get the value
+                // that was atomically reserved for this chunk.
+                uint chunkTsn = unchecked((uint)Interlocked.Increment(ref tsn)) - 1;
+                var dataChunk = new SctpDataChunk(false, i == 0, i == chunkCount - 1, chunkTsn, streamID, seqnum, ppid, data.Slice(offset, payloadLength));
+
                 while (!_sendQueue.TryAdd(dataChunk, 100))
                 {
                     if (_closed.HasOccurred)
@@ -221,7 +235,7 @@ namespace SIPSorcery.Net
                         return;
                     }
                     logger.LogWarning("SCTP send queue is full. Producer is blocked. Nudging sender thread.");
-                    _senderMre.Set(); // Nudge the sender thread in case it's asleep.
+                    _senderMre.Set();
                 }
                 Interlocked.Add(ref _bufferedAmountCounter, dataChunk.UserDataLength);
             }
@@ -247,57 +261,51 @@ namespace SIPSorcery.Net
             }
         }
 
-        public async Task Shutdown()
-        {
-            logger.LogDebug("Shutdown initiated. Waiting for queues to drain.");
-            while (_sendQueue.Count > 0 || _outstandingBytes > 0)
-            {
-                _senderMre.Set();
-                await Task.Delay(100).ConfigureAwait(false);
-            }
-            logger.LogDebug("All data sent and acknowledged. Closing sender.");
-            Close();
-        }
-
         private void DoSend(object state)
         {
             try
             {
                 while (!_closed.HasOccurred)
                 {
-                    // Logging removed for brevity, but you can add it back if needed.
                     var now = SctpDataChunk.Timestamp.Now;
                     int chunksSent = 0;
                     uint currentCongestionWindow;
                     uint currentReceiverWindow;
+                    uint outstanding;
 
                     lock (_syncLock)
                     {
                         currentCongestionWindow = _congestionWindow;
                         currentReceiverWindow = _receiverWindow;
+                        outstanding = (uint)_outstandingBytes;
                     }
 
-                    var outstanding = (uint)_outstandingBytes;
+                    
                     int burstSize = (_inRetransmitMode.IsOn() || _inFastRecoveryMode.IsOn() || currentCongestionWindow < outstanding || currentReceiverWindow == 0) ? 1 : MAX_BURST;
-
-                    // Sending logic (Fast Retransmit, New Chunks, RTO) remains the same...
 
                     // 1. Fast Retransmit missing chunks.
                     if (chunksSent < burstSize && !_missingChunks.IsEmpty)
                     {
                         List<uint> tsnsToResend = null;
-                        lock (_syncLock)
+
+                        // Removed lock and switched to idiomatic ConcurrentDictionary usage.
+                        // This reduces lock contention with the SACK processing thread and uses the
+                        // thread-safe TryUpdate method, which is the correct way to modify a value
+                        // during enumeration.
+                        foreach (var missing in _missingChunks)
                         {
-                            foreach (var missing in _missingChunks)
+                            if (missing.Value >= FAST_RETRANSMIT_ACK_THRESHOLD)
                             {
-                                if (missing.Value >= FAST_RETRANSMIT_ACK_THRESHOLD)
+                                // Attempt to reset the miss count to 0 atomically. This prevents
+                                // resending the same packet multiple times if another thread is involved.
+                                if (_missingChunks.TryUpdate(missing.Key, 0, missing.Value))
                                 {
                                     tsnsToResend ??= new List<uint>();
                                     tsnsToResend.Add(missing.Key);
-                                    _missingChunks[missing.Key] = 0;
                                 }
                             }
                         }
+
                         if (tsnsToResend != null)
                         {
                             foreach (var tsnToResend in tsnsToResend)
@@ -389,8 +397,11 @@ namespace SIPSorcery.Net
                         foreach (var chunk in chunksToResendRTO)
                         {
                             if (chunksSent >= burstSize) break;
-                            _sendDataChunk(chunk);
-                            chunksSent++;
+                            if (_unconfirmedChunks.ContainsKey(chunk.TSN))
+                            {
+                                _sendDataChunk(chunk);
+                                chunksSent++;
+                            }
                         }
                     }
 
@@ -428,6 +439,7 @@ namespace SIPSorcery.Net
         {
             if (!_unconfirmedChunks.IsEmpty)
             {
+                // This read is not locked, but a slightly stale RTO for the wait period is acceptable.
                 return (int)(_hasRoundTripTime ? _rto : RTO_INITIAL_SECONDS * 1000);
             }
             if (_closed.HasOccurred)
