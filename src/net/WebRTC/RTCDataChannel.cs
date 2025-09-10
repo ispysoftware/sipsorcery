@@ -16,7 +16,7 @@
 
 using System;
 using System.Text;
-using System.Threading.Tasks;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Sys;
 
@@ -48,6 +48,8 @@ namespace SIPSorcery.Net
     public class RTCDataChannel : IRTCDataChannel
     {
         private static ILogger logger = Log.Logger;
+
+        private readonly Lock _sendLock = new Lock();
 
         public string label { get; set; }
 
@@ -136,30 +138,16 @@ namespace SIPSorcery.Net
         {
             if (message != null && Encoding.UTF8.GetByteCount(message) > _transport.maxMessageSize)
             {
-                throw new ApplicationException($"Data channel {label} was requested to send data of length {Encoding.UTF8.GetByteCount(message)} " +
-                    $" that exceeded the maximum allowed message size of {_transport.maxMessageSize}.");
+                throw new ApplicationException($"Data channel {label} was requested to send data that exceeded the maximum message size of {_transport.maxMessageSize}.");
             }
-            else if (_transport.state != RTCSctpTransportState.Connected)
+
+            if (string.IsNullOrEmpty(message))
             {
-                throw new InvalidOperationException("SCTP transport is not connected.");
+                DoSend((uint)DataChannelPayloadProtocols.WebRTC_String_Empty, new byte[] { 0x00 });
             }
             else
             {
-                lock (this)
-                {
-                    if (string.IsNullOrEmpty(message))
-                    {
-                        _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(),
-                            (uint)DataChannelPayloadProtocols.WebRTC_String_Empty,
-                            new byte[] { 0x00 });
-                    }
-                    else
-                    {
-                        _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(),
-                            (uint)DataChannelPayloadProtocols.WebRTC_String,
-                            Encoding.UTF8.GetBytes(message));
-                    }
-                }
+                DoSend((uint)DataChannelPayloadProtocols.WebRTC_String, Encoding.UTF8.GetBytes(message));
             }
         }
 
@@ -172,30 +160,29 @@ namespace SIPSorcery.Net
         {
             if (data.Length > _transport.maxMessageSize)
             {
-                throw new ApplicationException($"Data channel {label} was requested to send data of length {data.Length} " +
-                    $" that exceeded the maximum allowed message size of {_transport.maxMessageSize}.");
+                throw new ApplicationException($"Data channel {label} was requested to send data that exceeded the maximum message size of {_transport.maxMessageSize}.");
             }
-            else if (_transport.state != RTCSctpTransportState.Connected)
+
+            if (data.Length == 0)
             {
-                throw new InvalidOperationException("SCTP transport is not connected.");
+                DoSend((uint)DataChannelPayloadProtocols.WebRTC_Binary_Empty, new byte[] { 0x00 });
             }
             else
             {
-                lock (this)
-                {
-                    if (data.Length == 0)
-                    {
-                        _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(),
-                            (uint)DataChannelPayloadProtocols.WebRTC_Binary_Empty,
-                            new byte[] { 0x00 });
-                    }
-                    else
-                    {
-                        _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(),
-                            (uint)DataChannelPayloadProtocols.WebRTC_Binary,
-                           data);
-                    }
-                }
+                DoSend((uint)DataChannelPayloadProtocols.WebRTC_Binary, data);
+            }
+        }
+
+        private void DoSend(uint ppid, ReadOnlySpan<byte> data)
+        {
+            if (_transport.state != RTCSctpTransportState.Connected)
+            {
+                throw new InvalidOperationException("SCTP transport is not connected.");
+            }
+
+            lock (_sendLock)
+            {
+                _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(), ppid, data);
             }
         }
 
@@ -227,7 +214,7 @@ namespace SIPSorcery.Net
                 Protocol = protocol,
             };
 
-            lock (this)
+            lock (_sendLock)
             {
                 _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(),
                        (uint)DataChannelPayloadProtocols.WebRTC_DCEP,
@@ -241,7 +228,7 @@ namespace SIPSorcery.Net
         /// </summary>
         internal void SendDcepAck()
         {
-            lock (this)
+            lock (_sendLock)
             {
                 _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(),
                        (uint)DataChannelPayloadProtocols.WebRTC_DCEP,
