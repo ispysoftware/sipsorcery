@@ -613,5 +613,10 @@ namespace SIPSorcery.Media
                 }
             }
         }
+
+        public void Dispose()
+        {
+            
+        }
     }
 }
