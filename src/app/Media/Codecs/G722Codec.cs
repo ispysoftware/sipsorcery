@@ -355,76 +355,63 @@ namespace SIPSorcery.Media
             return outlen;
         }
 
-        /// <summary>
-        /// Encodes a buffer of G722
+        /// Encodes 16-bit PCM samples into G.722 format.
         /// </summary>
-        /// <param name="state">Codec state</param>
-        /// <param name="outputBuffer">Output buffer (to contain encoded G722)</param>
-        /// <param name="inputBuffer">PCM 16 bit samples to encode</param>
-        /// <param name="inputBufferCount">Number of samples in the input buffer to encode</param>
-        /// <returns>Number of encoded bytes written into output buffer</returns>
-        public int Encode(G722CodecState state, byte[] outputBuffer, short[] inputBuffer, int inputBufferCount)
+        /// <param name="state">The current state of the G.722 codec.</param>
+        /// <param name="destination">The buffer to write the encoded G.722 data into.</param>
+        /// <param name="pcm">The input PCM audio samples.</param>
+        /// <returns>The number of bytes written to the destination buffer.</returns>
+        public int Encode(G722CodecState state, Span<byte> destination, ReadOnlySpan<short> pcm)
         {
-            int dlow;
-            int dhigh;
-            int el;
-            int wd;
-            int wd1;
-            int ril;
-            int wd2;
-            int il4;
-            int ih2;
-            int wd3;
-            int eh;
-            int mih;
-            int i;
-            int j;
-            // Low and high band PCM from the QMF
-            int xlow;
-            int xhigh;
-            int g722_bytes;
-            // Even and odd tap accumulators
-            int sumeven;
-            int sumodd;
-            int ihigh;
-            int ilow;
-            int code;
+            // Local variables for the G.722 algorithm
+            int dlow, dhigh, el, wd, wd1, ril, wd2, il4, ih2, wd3, eh, mih, i;
+            int xlow, xhigh, g722_bytes;
+            int sumeven, sumodd;
+            int ihigh, ilow, code;
 
             g722_bytes = 0;
-            xhigh = 0;
-            for (j = 0; j < inputBufferCount;)
+
+            // The main loop now iterates through the short samples directly.
+            // 'j' is incremented inside the loop as we consume samples.
+            for (int j = 0; j < pcm.Length;)
             {
                 if (state.ItuTestMode)
                 {
-                    xlow =
-                    xhigh = inputBuffer[j++] >> 1;
+                    // ITU test mode uses the same value for both bands.
+                    xlow = xhigh = pcm[j++] >> 1;
                 }
                 else
                 {
                     if (state.EncodeFrom8000Hz)
                     {
-                        xlow = inputBuffer[j++] >> 1;
+                        xlow = pcm[j++] >> 1;
+                        xhigh = 0; // High band is zero for 8kHz input
                     }
                     else
                     {
+                        // REFACTOR: This section is now much simpler.
+                        // It directly uses the 16-bit samples from the `pcm` span.
+
                         // Apply the transmit QMF
-                        // Shuffle the buffer down
+                        // Shuffle the history buffer down
                         for (i = 0; i < 22; i++)
                         {
                             state.QmfSignalHistory[i] = state.QmfSignalHistory[i + 2];
                         }
-                        state.QmfSignalHistory[22] = inputBuffer[j++];
-                        if (j < inputBufferCount)
+
+                        // Load the next two 16-bit samples into the history buffer.
+                        state.QmfSignalHistory[22] = pcm[j++];
+                        if (j < pcm.Length)
                         {
-                            state.QmfSignalHistory[23] = inputBuffer[j++];
+                            state.QmfSignalHistory[23] = pcm[j++];
                         }
                         else
                         {
-                            //Duplicate the last sample - fix odd shorts issue
+                            // If there's an odd number of samples, duplicate the last one.
                             state.QmfSignalHistory[23] = state.QmfSignalHistory[22];
                         }
 
-                        // Discard every other QMF output
+                        // Calculate low and high band samples from the QMF
                         sumeven = 0;
                         sumodd = 0;
                         for (i = 0; i < 12; i++)
@@ -436,19 +423,18 @@ namespace SIPSorcery.Media
                         xhigh = (sumeven - sumodd) >> 14;
                     }
                 }
+
+                // --- The rest of the G.722 encoding algorithm remains the same ---
+
                 // Block 1L, SUBTRA
                 el = Saturate(xlow - state.Band[0].s);
 
                 // Block 1L, QUANTL
                 wd = (el >= 0) ? el : -(el + 1);
-
                 for (i = 1; i < 30; i++)
                 {
                     wd1 = (q6[i] * state.Band[0].det) >> 12;
-                    if (wd < wd1)
-                    {
-                        break;
-                    }
+                    if (wd < wd1) break;
                 }
                 ilow = (el < 0) ? iln[i] : ilp[i];
 
@@ -461,14 +447,8 @@ namespace SIPSorcery.Media
                 il4 = rl42[ril];
                 wd = (state.Band[0].nb * 127) >> 7;
                 state.Band[0].nb = wd + wl[il4];
-                if (state.Band[0].nb < 0)
-                {
-                    state.Band[0].nb = 0;
-                }
-                else if (state.Band[0].nb > 18432)
-                {
-                    state.Band[0].nb = 18432;
-                }
+                if (state.Band[0].nb < 0) state.Band[0].nb = 0;
+                else if (state.Band[0].nb > 18432) state.Band[0].nb = 18432;
 
                 // Block 3L, SCALEL
                 wd1 = (state.Band[0].nb >> 6) & 31;
@@ -480,7 +460,6 @@ namespace SIPSorcery.Media
 
                 if (state.EncodeFrom8000Hz)
                 {
-                    // Just leave the high bits as zero
                     code = (0xC0 | ilow) >> (8 - state.BitsPerSample);
                 }
                 else
@@ -502,14 +481,8 @@ namespace SIPSorcery.Media
                     ih2 = rh2[ihigh];
                     wd = (state.Band[1].nb * 127) >> 7;
                     state.Band[1].nb = wd + wh[ih2];
-                    if (state.Band[1].nb < 0)
-                    {
-                        state.Band[1].nb = 0;
-                    }
-                    else if (state.Band[1].nb > 22528)
-                    {
-                        state.Band[1].nb = 22528;
-                    }
+                    if (state.Band[1].nb < 0) state.Band[1].nb = 0;
+                    else if (state.Band[1].nb > 22528) state.Band[1].nb = 22528;
 
                     // Block 3H, SCALEH
                     wd1 = (state.Band[1].nb >> 6) & 31;
@@ -528,14 +501,20 @@ namespace SIPSorcery.Media
                     state.OutBits += state.BitsPerSample;
                     if (state.OutBits >= 8)
                     {
-                        outputBuffer[g722_bytes++] = (byte)(state.OutBuffer & 0xFF);
+                        if (g722_bytes < destination.Length)
+                        {
+                            destination[g722_bytes++] = (byte)(state.OutBuffer & 0xFF);
+                        }
                         state.OutBits -= 8;
                         state.OutBuffer >>= 8;
                     }
                 }
                 else
                 {
-                    outputBuffer[g722_bytes++] = (byte)code;
+                    if (g722_bytes < destination.Length)
+                    {
+                        destination[g722_bytes++] = (byte)code;
+                    }
                 }
             }
             return g722_bytes;

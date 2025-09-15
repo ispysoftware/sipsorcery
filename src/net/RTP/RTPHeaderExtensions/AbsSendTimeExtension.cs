@@ -1,96 +1,81 @@
 ﻿using System;
-using System.Collections.Generic;
-using SIPSorcery.Net;
+using System.Buffers.Binary;
 
 namespace SIPSorcery.Net
 {
-    // AbsSendTimeExtension is a extension payload format in
-    // http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
-    // Code reference: https://chromium.googlesource.com/external/webrtc/+/e2a017725570ead5946a4ca8235af27470ca0df9/webrtc/modules/rtp_rtcp/source/rtp_header_extensions.cc#19
-    public class AbsSendTimeExtension: RTPHeaderExtension
+    public class AbsSendTimeExtension : RTPHeaderExtension
     {
         public const string RTP_HEADER_EXTENSION_URI = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+        internal const int RTP_HEADER_EXTENSION_SIZE = 3; // The payload is 3 bytes (24 bits).
 
+        private static readonly DateTimeOffset UnixEpoch = new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero);
         public static readonly string[] SUPPORTED_URIS =
         {
             RTP_HEADER_EXTENSION_URI,
             "urn:ietf:params:rtp-hdrext:sdes:abs-send-time"
         };
+        /// <summary>
+        /// The parsed 24-bit absolute send time value.
+        /// </summary>
+        public uint Timestamp { get; private set; }
 
-        internal const int RTP_HEADER_EXTENSION_SIZE = 3;
-
-        public AbsSendTimeExtension(int id): base(id, RTP_HEADER_EXTENSION_URI, SUPPORTED_URIS, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte)
-        {
-        }
+        public AbsSendTimeExtension(int id) : base(id, RTP_HEADER_EXTENSION_URI,
+            SUPPORTED_URIS,
+            RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte)
+        { }
 
         public override void Set(Object value)
         {
-            // Nothing to do here 
-        }
-
-        internal static byte[] AbsSendTime(int id, int extensionSize, DateTimeOffset now)
-        {
-            // inspired by https://github.com/pion/rtp/blob/master/abssendtimeextension.go
-            ulong unixNanoseconds = (ulong)((now - UnixEpoch).Ticks * 100L);
-            var seconds = unixNanoseconds / (ulong)1e9;
-            seconds += 0x83AA7E80UL; // offset in seconds between unix epoch and ntp epoch
-            var f = unixNanoseconds % (ulong)1e9;
-            f <<= 32;
-            f /= (ulong)1e9;
-            seconds <<= 32;
-            var ntp = seconds | f;
-            var abs = ntp >> 14;
-
-            return new[]
+            if (value is uint timestamp)
             {
-                (byte)((id << 4) | extensionSize - 1),
-                (byte)((abs & 0xff0000UL) >> 16),
-                (byte)((abs & 0xff00UL) >> 8),
-                (byte)(abs & 0xffUL)
-            };
-        }
-        
-        public override byte[] Marshal()
-        {
-            return AbsSendTime(Id, ExtensionSize, DateTimeOffset.Now);
+                Timestamp = timestamp;
+            }
         }
 
-        
-        public override Object Unmarshal(RTPHeader header, byte[] data)
+        // --- START OF REFACTORED METHODS ---
+
+        /// <summary>
+        /// Calculates the current absolute send time and writes the 3-byte payload
+        /// into the destination buffer.
+        /// </summary>
+        public override int Marshal(Span<byte> destination)
         {
-            // Check for the correct payload size
-            if (data == null || data.Length != RTP_HEADER_EXTENSION_SIZE)
+            if (destination.Length < RTP_HEADER_EXTENSION_SIZE)
             {
-                return null;
+                throw new ArgumentException($"Destination buffer is too small for AbsSendTime payload, requires {RTP_HEADER_EXTENSION_SIZE} bytes.", nameof(destination));
             }
 
-            // Combine the 3 bytes into a 64-bit value for calculation
-            ulong receivedAbsSendTime = ((ulong)data[0] << 16) | ((ulong)data[1] << 8) | (ulong)data[2];
+            // Calculate the 64-bit NTP timestamp.
+            ulong unixNanoseconds = (ulong)((DateTimeOffset.UtcNow - UnixEpoch).Ticks * 100L);
+            var seconds = unixNanoseconds / 1_000_000_000UL;
+            seconds += 0x83AA7E80UL; // NTP epoch offset.
+            var fractions = (unixNanoseconds % 1_000_000_000UL) << 32;
+            fractions /= 1_000_000_000UL;
+            var ntpTimestamp = (seconds << 32) | fractions;
 
-            // The receivedAbsSendTime is the 24-bit value from the sender.
-            // The receiver's job is to use this value to get an estimated
-            // NTP timestamp for synchronization. This is often done by taking
-            // the local NTP time and replacing its high bits with the received 
-            // 24-bit value.
+            // The absolute send time is the middle 24 bits of the NTP timestamp.
+            uint absSendTime24bit = (uint)((ntpTimestamp >> 14) & 0xFFFFFF);
 
-            // For simplicity, let's just return the value as part of the TimestampPair.
-            // The actual synchronization logic would be handled by the caller.
-            return new TimestampPair() { NtpTimestamp = receivedAbsSendTime, RtpTimestamp = header.Timestamp };
+            // Write the 24-bit value directly into the buffer in Big Endian format.
+            destination[0] = (byte)(absSendTime24bit >> 16);
+            destination[1] = (byte)(absSendTime24bit >> 8);
+            destination[2] = (byte)absSendTime24bit;
+
+            return RTP_HEADER_EXTENSION_SIZE;
         }
 
-        // DateTimeOffset.UnixEpoch only available in newer target frameworks
-        private static readonly DateTimeOffset UnixEpoch = new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero);
-
-        private ulong? GetUlong(byte[] data)
+        /// <summary>
+        /// Parses the 3-byte absolute send time payload from a buffer and sets the
+        /// Timestamp property.
+        /// </summary>
+        public override void Unmarshal(ReadOnlySpan<byte> data)
         {
-            if ( (data.Length != ExtensionSize) || ((sizeof(ulong) - 1) > data.Length) )
+            if (data.Length != RTP_HEADER_EXTENSION_SIZE)
             {
-                return null;
+                throw new ArgumentException($"Invalid AbsSendTime extension payload size, expected {RTP_HEADER_EXTENSION_SIZE} but got {data.Length}.");
             }
 
-            return BitConverter.IsLittleEndian ?
-                SIPSorcery.Sys.NetConvert.DoReverseEndian(BitConverter.ToUInt64(data, 0)) :
-                BitConverter.ToUInt64(data, 0);
+            Timestamp = (uint)(data[0] << 16 | data[1] << 8 | data[2]);
         }
     }
 }

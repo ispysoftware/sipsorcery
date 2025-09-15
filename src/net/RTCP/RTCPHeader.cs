@@ -77,9 +77,9 @@ namespace SIPSorcery.Net
 
         public int Version { get; private set; } = RTCP_VERSION;         // 2 bits.
         public int PaddingFlag { get; private set; } = 0;                 // 1 bit.
-        public int ReceptionReportCount { get; private set; } = 0;        // 5 bits.
+        public int ReceptionReportCount { get; set; } = 0;        // 5 bits.
         public RTCPReportTypesEnum PacketType { get; private set; }       // 8 bits.
-        public UInt16 Length { get; private set; }                        // 16 bits.
+        public UInt16 Length { get; set; }                        // 16 bits.
 
         /// <summary>
         /// The Feedback Message Type is used for RFC4585 transport layer feedback reports.
@@ -195,38 +195,48 @@ namespace SIPSorcery.Net
             Length = length;
         }
 
+        /// <summary>
+        /// The new, allocation-free method to write the header to a buffer.
+        /// </summary>
+        /// <param name="destination">The buffer to write the header into.</param>
+        /// <returns>The number of bytes written (always 4).</returns>
+        public int WriteTo(Span<byte> destination)
+        {
+            if (destination.Length < HEADER_BYTES_LENGTH)
+            {
+                throw new ArgumentException("Destination buffer is too small for the RTCP header.");
+            }
+
+            int countOrFmt = 0;
+            if (PacketType == RTCPReportTypesEnum.RTPFB)
+            {
+                countOrFmt = (int)FeedbackMessageType;
+            }
+            else if (PacketType == RTCPReportTypesEnum.PSFB)
+            {
+                countOrFmt = (int)PayloadFeedbackMessageType;
+            }
+            else
+            {
+                countOrFmt = ReceptionReportCount;
+            }
+
+            destination[0] = (byte)((Version << 6) | (PaddingFlag << 5) | countOrFmt);
+            destination[1] = (byte)PacketType;
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(2), Length);
+
+            return HEADER_BYTES_LENGTH;
+        }
+
+        /// <summary>
+        /// Gets the header as a new byte array.
+        /// NOTE: This method allocates and is less efficient than WriteTo.
+        /// </summary>
         public byte[] GetBytes()
         {
-            byte[] header = new byte[4];
-
-            UInt32 firstWord = ((uint)Version << 30) + ((uint)PaddingFlag << 29) + ((uint)PacketType << 16) + Length;
-
-            if (IsFeedbackReport())
-            {
-                if (PacketType == RTCPReportTypesEnum.RTPFB)
-                {
-                    firstWord += (uint)FeedbackMessageType << 24;
-                }
-                else
-                {
-                    firstWord += (uint)PayloadFeedbackMessageType << 24;
-                }
-            }
-            else
-            {
-                firstWord += (uint)ReceptionReportCount << 24;
-            }
-
-            if (BitConverter.IsLittleEndian)
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(firstWord)), 0, header, 0, 4);
-            }
-            else
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(firstWord), 0, header, 0, 4);
-            }
-
-            return header;
+            byte[] buffer = new byte[HEADER_BYTES_LENGTH];
+            WriteTo(buffer);
+            return buffer;
         }
     }
 }

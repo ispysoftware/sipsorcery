@@ -63,75 +63,75 @@ namespace SIPSorcery.Net
 
         public byte[] GotRtpPacket(RTPPacket rtpPacket)
         {
-            var payload = rtpPacket.GetPayloadBytes();
+            //var payload = rtpPacket.GetPayloadBytes();
 
-            var hdr = rtpPacket.Header;
+            //var hdr = rtpPacket.Header;
 
-            if (_codec == VideoCodecsEnum.VP8)
-            {
-                //logger.LogDebug("rtp VP8 video, seqnum {SequenceNumber}, ts {Timestamp}, marker {MarkerBit}, payload {PayloadLength}.", hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, payload.Length);
+            //if (_codec == VideoCodecsEnum.VP8)
+            //{
+            //    //logger.LogDebug("rtp VP8 video, seqnum {SequenceNumber}, ts {Timestamp}, marker {MarkerBit}, payload {PayloadLength}.", hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, payload.Length);
 
-                if (_currVideoFramePosn + payload.Length >= _maxFrameSize)
-                {
-                    // Something has gone very wrong. Clear the buffer.
-                    _currVideoFramePosn = 0;
-                }
+            //    if (_currVideoFramePosn + payload.Length >= _maxFrameSize)
+            //    {
+            //        // Something has gone very wrong. Clear the buffer.
+            //        _currVideoFramePosn = 0;
+            //    }
 
-                // New frames must have the VP8 Payload Descriptor Start bit set.
-                // The tracking of the current video frame position is to deal with a VP8 frame being split across multiple RTP packets
-                // as per https://tools.ietf.org/html/rfc7741#section-4.4.
-                if (_currVideoFramePosn > 0 || (payload[0] & 0x10) > 0)
-                {
-                    RtpVP8Header vp8Header = RtpVP8Header.GetVP8Header(payload);
+            //    // New frames must have the VP8 Payload Descriptor Start bit set.
+            //    // The tracking of the current video frame position is to deal with a VP8 frame being split across multiple RTP packets
+            //    // as per https://tools.ietf.org/html/rfc7741#section-4.4.
+            //    if (_currVideoFramePosn > 0 || (payload[0] & 0x10) > 0)
+            //    {
+            //        RtpVP8Header vp8Header = RtpVP8Header.GetVP8Header(payload);
 
-                    Buffer.BlockCopy(payload, vp8Header.Length, _currVideoFrame, _currVideoFramePosn, payload.Length - vp8Header.Length);
-                    _currVideoFramePosn += payload.Length - vp8Header.Length;
+            //        Buffer.BlockCopy(payload, vp8Header.Length, _currVideoFrame, _currVideoFramePosn, payload.Length - vp8Header.Length);
+            //        _currVideoFramePosn += payload.Length - vp8Header.Length;
 
-                    if (rtpPacket.Header.MarkerBit > 0)
-                    {
-                        var frame = _currVideoFrame.Take(_currVideoFramePosn).ToArray();
+            //        if (rtpPacket.Header.MarkerBit > 0)
+            //        {
+            //            var frame = _currVideoFrame.Take(_currVideoFramePosn).ToArray();
 
-                        _currVideoFramePosn = 0;
+            //            _currVideoFramePosn = 0;
 
-                        return frame;
-                    }
-                }
-                else
-                {
-                    logger.LogWarning("Discarding RTP packet, VP8 header Start bit not set.");
-                    //logger.LogWarning("rtp video, seqnum {SequenceNumber}, ts {Timestamp}, marker {MarkerBit}, payload {PayloadLength}.", hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, payload.Length);
-                }
-            }
-            else if (_codec == VideoCodecsEnum.H264)
-            {
-                var frameStream = _h264Depacketiser.ProcessRTPPayload(payload, hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, out bool isKeyFrame);
+            //            return frame;
+            //        }
+            //    }
+            //    else
+            //    {
+            //        logger.LogWarning("Discarding RTP packet, VP8 header Start bit not set.");
+            //        //logger.LogWarning("rtp video, seqnum {SequenceNumber}, ts {Timestamp}, marker {MarkerBit}, payload {PayloadLength}.", hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, payload.Length);
+            //    }
+            //}
+            //else if (_codec == VideoCodecsEnum.H264)
+            //{
+            //    var frameStream = _h264Depacketiser.ProcessRTPPayload(payload, hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, out bool isKeyFrame);
 
-                if (frameStream != null)
-                {
-                    return frameStream.ToArray();
-                }
-            }
-            else if (_codec == VideoCodecsEnum.H265)
-            {
-                var frameStream = _h265Depacketiser.ProcessRTPPayload(payload, hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, out bool isKeyFrame);
+            //    if (frameStream != null)
+            //    {
+            //        return frameStream.ToArray();
+            //    }
+            //}
+            //else if (_codec == VideoCodecsEnum.H265)
+            //{
+            //    var frameStream = _h265Depacketiser.ProcessRTPPayload(payload, hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, out bool isKeyFrame);
 
-                if (frameStream != null)
-                {
-                    return frameStream.ToArray();
-                }
-            }
-            else if(_codec == VideoCodecsEnum.JPEG)
-            {
-                var frameStream = _mJPEGDepacketiser.ProcessRTPPayload(payload, hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, out bool isKeyFrame);
-                if (frameStream != null)
-                {
-                    return frameStream.ToArray();
-                }
-            }
-            else
-            {
-                logger.LogWarning("rtp unknown video, seqnum {SequenceNumber}, ts {Timestamp}, marker {MarkerBit}, payload {PayloadLength}.", hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, payload.Length);
-            }
+            //    if (frameStream != null)
+            //    {
+            //        return frameStream.ToArray();
+            //    }
+            //}
+            //else if(_codec == VideoCodecsEnum.JPEG)
+            //{
+            //    var frameStream = _mJPEGDepacketiser.ProcessRTPPayload(payload, hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, out bool isKeyFrame);
+            //    if (frameStream != null)
+            //    {
+            //        return frameStream.ToArray();
+            //    }
+            //}
+            //else
+            //{
+            //    logger.LogWarning("rtp unknown video, seqnum {SequenceNumber}, ts {Timestamp}, marker {MarkerBit}, payload {PayloadLength}.", hdr.SequenceNumber, hdr.Timestamp, hdr.MarkerBit, payload.Length);
+            //}
 
             return null;
         }

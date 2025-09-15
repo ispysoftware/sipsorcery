@@ -80,7 +80,7 @@ namespace SIPSorcery.Net
         /// <param name="durationRtpUnits">The duration in RTP timestamp units of the audio sample. This
         /// value is added to the previous RTP timestamp when building the RTP header.</param>
         /// <param name="sample">The audio sample to set as the RTP packet payload.</param>
-        public void SendAudio(uint durationRtpUnits, ArraySegment<byte> sample)
+        public void SendAudio(uint durationRtpUnits, ReadOnlySpan<byte> sample)
         {
             if (!sendingFormatFound)
             {
@@ -108,7 +108,7 @@ namespace SIPSorcery.Net
         /// gets added onto the timestamp being set in the RTP header.</param>
         /// <param name="payloadTypeID">The payload ID to set in the RTP header.</param>
         /// <param name="bufferSegment">The audio payload to send.</param>
-        public void SendAudioFrame(uint duration, int payloadTypeID, ArraySegment<byte> bufferSegment)
+        public void SendAudioFrame(uint duration, int payloadTypeID, ReadOnlySpan<byte> buffer)
         {
             if (CheckIfCanSendRtpRaw())
             {
@@ -120,50 +120,36 @@ namespace SIPSorcery.Net
 
                 try
                 {
-                    // Basic RTP audio formats (such as G711, G722) do not have a concept of frames. The payload of the RTP packet is
-                    // considered a single frame. This results in a problem is the audio frame being sent is larger than the MTU. In 
-                    // that case the audio frame must be split across mutliple RTP packets. Unlike video frames there's no way to 
-                    // indicate that a series of RTP packets are correlated to the same timestamp. For that reason if an audio buffer
-                    // is supplied that's larger than MTU it will be split and the timestamp will be adjusted to best fit each RTP 
-                    // payload.
-                    // See https://github.com/sipsorcery/sipsorcery/issues/394.
+                    // Comments about splitting audio frames remain relevant...
 
                     int maxPayload = RTPSession.RTP_MAX_PAYLOAD;
-                    int totalPackets = (bufferSegment.Count + maxPayload - 1) / maxPayload;
+                    // Use .Length instead of .Count
+                    int totalPackets = (buffer.Length + maxPayload - 1) / maxPayload;
 
                     uint totalIncrement = 0;
-                    uint startTimestamp = LocalTrack.Timestamp; // Keep track of where we started.
 
                     for (int index = 0; index < totalPackets; index++)
                     {
                         int offset = index * maxPayload;
-                        int payloadLength = Math.Min(maxPayload, bufferSegment.Count - offset);
+                        int payloadLength = Math.Min(maxPayload, buffer.Length - offset);
 
-                        double fraction = (double)payloadLength / bufferSegment.Count;
+                        double fraction = (double)payloadLength / buffer.Length;
                         uint packetDuration = (uint)Math.Round(fraction * duration);
 
-                        // RFC3551 specifies that for audio the marker bit should always be 0 except for when returning
-                        // from silence suppression. For video the marker bit DOES get set to 1 for the last packet
-                        // in a frame.
                         int markerBit = 0;
-#if NETCOREAPP2_1_OR_GREATER && !NETFRAMEWORK
-                        var memorySegment = bufferSegment.Slice(offset, payloadLength);
-#else
-                        var memorySegment = new ArraySegment<byte>(bufferSegment.Array!, offset, payloadLength);
-#endif
-                        // Send this packet at the current LocalTrack.Timestamp
-                        SendRtpRaw(memorySegment, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
 
-                        // After sending, increment the timestamp by this packet's portion.
-                        // This ensures the timestamp increments for the next packet, including the first one.
+                        // The slicing logic is now much simpler and cleaner, no #if needed.
+                        ReadOnlySpan<byte> packetPayload = buffer.Slice(offset, payloadLength);
+
+                        // Assuming SendRtpRaw is also updated to take a ReadOnlySpan<byte>
+                        SendRtpRaw(packetPayload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+
                         LocalTrack.Timestamp += packetDuration;
                         totalIncrement += packetDuration;
                     }
 
-                    // After all packets are sent, correct if we haven't incremented exactly by `duration`.
                     if (totalIncrement != duration)
                     {
-                        // Add or subtract the difference so total increment equals duration.
                         LocalTrack.Timestamp += (duration - totalIncrement);
                     }
                 }

@@ -110,11 +110,18 @@ namespace SIPSorcery.Net
         // Function to call to set a new value to this extension
         public abstract void Set(Object obj);
 
-        // Function to call to get the payload when writting the RTP header
-        public abstract byte[] Marshal();
+        /// <summary>
+        /// Writes the extension's payload into a destination buffer.
+        /// </summary>
+        /// <param name="destination">The buffer to write the payload into.</param>
+        /// <returns>The number of bytes written.</returns>
+        public abstract int Marshal(Span<byte> destination);
 
-        // Function to call when reading the RTP header
-        public abstract Object Unmarshal(RTPHeader header, byte[] data);
+        /// <summary>
+        /// Parses the extension's payload from a buffer slice.
+        /// </summary>
+        /// <param name="data">The buffer slice containing the extension payload.</param>
+        public abstract void Unmarshal(ReadOnlySpan<byte> data);
     }
 
     public enum RTPHeaderExtensionType
@@ -125,14 +132,20 @@ namespace SIPSorcery.Net
 
     public class RTPHeaderExtensionData
     {
-        public RTPHeaderExtensionData(int id, byte[] data, RTPHeaderExtensionType type)
+        // The data is now stored as a memory slice, not an owned array.
+        public ReadOnlyMemory<byte> Data { get; }
+        public int Id { get; }
+        public RTPHeaderExtensionType Type { get; }
+
+        /// <summary>
+        /// Creates a new RTP Header Extension from a memory slice.
+        /// This constructor is allocation-free.
+        /// </summary>
+        public RTPHeaderExtensionData(int id, ReadOnlyMemory<byte> data, RTPHeaderExtensionType type)
         {
             Id = id;
             Data = data;
             Type = type;
         }
-        public int Id { get; }
-        public byte[] Data { get; }
-        public RTPHeaderExtensionType Type { get; }
     }
 }

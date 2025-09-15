@@ -16,6 +16,7 @@
  *   2025-02-20  Initial creation.
  */
 using System;
+using System.Buffers.Binary;
 
 namespace SIPSorcery.Net
 {
@@ -72,42 +73,35 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
-        /// Marshals the TWCC header extension to a byte array.
-        /// The first byte is the one-byte header (with id and length) and
-        /// the following two bytes are the sequence number in network (big-endian) order.
+        /// Writes the 2-byte TWCC sequence number payload into the destination buffer.
         /// </summary>
-        /// <returns>A byte array containing the marshalled TWCC header extension.</returns>
-        public override byte[] Marshal()
+        /// <param name="destination">The buffer to write the payload into.</param>
+        /// <returns>The number of bytes written (always 2 for TWCC).</returns>
+        public override int Marshal(Span<byte> destination)
         {
-            // Construct the one-byte header. (id << 4) | (extensionSize - 1)
-            byte headerByte = (byte)((Id << 4) | (RTP_HEADER_EXTENSION_SIZE - 1));
-
-            // Convert the sequence number to a 2-byte array in big-endian order.
-            byte[] seqBytes = BitConverter.GetBytes(SequenceNumber);
-            if (BitConverter.IsLittleEndian)
+            if (destination.Length < RTP_HEADER_EXTENSION_SIZE)
             {
-                Array.Reverse(seqBytes);
+                throw new ArgumentException($"Destination buffer is too small for TWCC payload, requires {RTP_HEADER_EXTENSION_SIZE} bytes but got {destination.Length}.", nameof(destination));
             }
 
-            return new byte[] { headerByte, seqBytes[0], seqBytes[1] };
+            BinaryPrimitives.WriteUInt16BigEndian(destination, SequenceNumber);
+
+            return RTP_HEADER_EXTENSION_SIZE;
         }
 
         /// <summary>
-        /// Unmarshals the TWCC header extension from the provided data.
+        /// Parses the 2-byte TWCC sequence number from a buffer slice and sets the
+        /// SequenceNumber property.
         /// </summary>
-        /// <param name="header">The RTP header (if additional context is needed).</param>
-        /// <param name="data">The extension payload (should be exactly 2 bytes).</param>
-        /// <returns>The extracted TWCC sequence number (as a ushort).</returns>
-        public override object Unmarshal(RTPHeader header, byte[] data)
+        /// <param name="data">The buffer slice containing the 2-byte extension payload.</param>
+        public override void Unmarshal(ReadOnlySpan<byte> data)
         {
             if (data.Length != RTP_HEADER_EXTENSION_SIZE)
             {
                 throw new ArgumentException($"Invalid TWCC extension payload size, expected {RTP_HEADER_EXTENSION_SIZE} but got {data.Length}.");
             }
 
-            // Combine the two bytes into a ushort (big-endian).
-            ushort seqNum = (ushort)((data[0] << 8) | data[1]);
-            return seqNum;
+            SequenceNumber = BinaryPrimitives.ReadUInt16BigEndian(data);
         }
     }
 }

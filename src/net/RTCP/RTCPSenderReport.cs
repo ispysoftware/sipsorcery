@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------------
 // Filename: RTCPSenderReport.cs
 //
 // Description:
@@ -66,20 +66,38 @@ namespace SIPSorcery.Net
     /// </remarks>
     public class RTCPSenderReport
     {
-        public const int SENDER_PAYLOAD_SIZE = 20;
-        public const int MIN_PACKET_SIZE = RTCPHeader.HEADER_BYTES_LENGTH + 4 + SENDER_PAYLOAD_SIZE;
+        public const int SENDER_PAYLOAD_SIZE = 24; // SSRC (4) + Sender Info (20)
+        public const int MIN_PACKET_SIZE = RTCPHeader.HEADER_BYTES_LENGTH + SENDER_PAYLOAD_SIZE;
 
-        public RTCPHeader Header;
-        public uint SSRC;
-        public ulong NtpTimestamp;
-        public uint RtpTimestamp;
-        public uint PacketCount;
-        public uint OctetCount;
-        public List<ReceptionReportSample> ReceptionReports;
+        public RTCPHeader Header { get; set; }
+        public uint SSRC { get; set; }
+        public ulong NtpTimestamp { get; set; }
+        public uint RtpTimestamp { get; set; }
+        public uint PacketCount { get; set; }
+        public uint OctetCount { get; set; }
+        public List<ReceptionReportSample> ReceptionReports { get; set; }
 
+        /// <summary>
+        /// The total length of this report in bytes.
+        /// </summary>
+        public int Length => MIN_PACKET_SIZE + (ReceptionReports?.Count ?? 0) * ReceptionReportSample.PAYLOAD_SIZE;
+
+        // Constructor for building a new report.
         public RTCPSenderReport(uint ssrc, ulong ntpTimestamp, uint rtpTimestamp, uint packetCount, uint octetCount, List<ReceptionReportSample> receptionReports)
         {
-            Header = new RTCPHeader(RTCPReportTypesEnum.SR, (receptionReports != null) ? receptionReports.Count : 0);
+            int rrCount = receptionReports?.Count ?? 0;
+
+            // First, calculate the total length of this report in bytes.
+            int totalLength = RTCPHeader.HEADER_BYTES_LENGTH + SENDER_PAYLOAD_SIZE + (rrCount * ReceptionReportSample.PAYLOAD_SIZE);
+
+            // The length field in the header is the number of 32-bit words minus one.
+            ushort lengthInWords = (ushort)(totalLength / 4 - 1);
+
+            // This is the corrected, two-step way to create and configure the header.
+            Header = new RTCPHeader(RTCPReportTypesEnum.SR, rrCount);
+            Header.Length = lengthInWords;
+
+            // The rest of the constructor remains the same.
             SSRC = ssrc;
             NtpTimestamp = ntpTimestamp;
             RtpTimestamp = rtpTimestamp;
@@ -89,67 +107,77 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
-        /// Create a new RTCP Sender Report from a serialised byte array.
+        /// High-performance parsing constructor (already well-written, with minor corrections).
         /// </summary>
-        /// <param name="packet">The byte array holding the serialised sender report.</param>
-        public RTCPSenderReport(ReadOnlySpan<byte> packet)
+        public RTCPSenderReport(ReadOnlySpan<byte> buffer)
         {
-            if (packet.Length < MIN_PACKET_SIZE)
+            if (buffer.Length < MIN_PACKET_SIZE)
             {
-                throw new ApplicationException("The packet did not contain the minimum number of bytes for an RTCPSenderReport packet.");
+                throw new ApplicationException("Packet is too small for an RTCPSenderReport.");
             }
 
-            Header = new RTCPHeader(packet);
+            Header = new RTCPHeader(buffer);
             ReceptionReports = new List<ReceptionReportSample>();
 
-            SSRC = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(4));
-            NtpTimestamp = BinaryPrimitives.ReadUInt64BigEndian(packet.Slice(8));
-            RtpTimestamp = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(16));
-            PacketCount = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(20));
-            OctetCount = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(24));
+            SSRC = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(4));
+            NtpTimestamp = BinaryPrimitives.ReadUInt64BigEndian(buffer.Slice(8));
+            RtpTimestamp = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(16));
+            PacketCount = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(20));
+            OctetCount = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(24));
 
-            int rrIndex = 28;
-            for (int i = 0; i < Header.ReceptionReportCount; i++)
+            int reportOffset = 28;
+            for (int i = 0; i < Header.ReceptionReportCount && buffer.Length >= reportOffset + ReceptionReportSample.PAYLOAD_SIZE; i++)
             {
-                var rr = new ReceptionReportSample(packet.Slice(rrIndex + i * ReceptionReportSample.PAYLOAD_SIZE));
+                var rr = new ReceptionReportSample(buffer.Slice(reportOffset));
                 ReceptionReports.Add(rr);
+                reportOffset += ReceptionReportSample.PAYLOAD_SIZE;
             }
         }
 
+        /// <summary>
+        /// Allocation-free serialization method.
+        /// </summary>
+        public int WriteTo(Span<byte> destination)
+        {
+            if (destination.Length < Length)
+            {
+                return 0; // Buffer is too small.
+            }
+
+            Header.Length = (ushort)(Length / 4 - 1);
+            Header.WriteTo(destination);
+
+            int cursor = RTCPHeader.HEADER_BYTES_LENGTH;
+            BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(cursor), SSRC);
+            cursor += 4;
+            BinaryPrimitives.WriteUInt64BigEndian(destination.Slice(cursor), NtpTimestamp);
+            cursor += 8;
+            BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(cursor), RtpTimestamp);
+            cursor += 4;
+            BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(cursor), PacketCount);
+            cursor += 4;
+            BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(cursor), OctetCount);
+            cursor += 4;
+
+            if (ReceptionReports != null)
+            {
+                foreach (var report in ReceptionReports)
+                {
+                    cursor += report.WriteTo(destination.Slice(cursor));
+                }
+            }
+
+            return cursor;
+        }
+
+        /// <summary>
+        /// Gets a new byte array containing the report.
+        /// NOTE: This method allocates and is less efficient than WriteTo.
+        /// </summary>
         public byte[] GetBytes()
         {
-            int rrCount = (ReceptionReports != null) ? ReceptionReports.Count : 0;
-            byte[] buffer = new byte[RTCPHeader.HEADER_BYTES_LENGTH + 4 + SENDER_PAYLOAD_SIZE + rrCount * ReceptionReportSample.PAYLOAD_SIZE];
-            Header.SetLength((ushort)(buffer.Length / 4 - 1));
-
-            Buffer.BlockCopy(Header.GetBytes(), 0, buffer, 0, RTCPHeader.HEADER_BYTES_LENGTH);
-            int payloadIndex = RTCPHeader.HEADER_BYTES_LENGTH;
-
-            if (BitConverter.IsLittleEndian)
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(SSRC)), 0, buffer, payloadIndex, 4);
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(NtpTimestamp)), 0, buffer, payloadIndex + 4, 8);
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(RtpTimestamp)), 0, buffer, payloadIndex + 12, 4);
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(PacketCount)), 0, buffer, payloadIndex + 16, 4);
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(OctetCount)), 0, buffer, payloadIndex + 20, 4);
-            }
-            else
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(SSRC), 0, buffer, payloadIndex, 4);
-                Buffer.BlockCopy(BitConverter.GetBytes(NtpTimestamp), 0, buffer, payloadIndex + 4, 8);
-                Buffer.BlockCopy(BitConverter.GetBytes(RtpTimestamp), 0, buffer, payloadIndex + 12, 4);
-                Buffer.BlockCopy(BitConverter.GetBytes(PacketCount), 0, buffer, payloadIndex + 16, 4);
-                Buffer.BlockCopy(BitConverter.GetBytes(OctetCount), 0, buffer, payloadIndex + 20, 4);
-            }
-
-            int bufferIndex = payloadIndex + 24;
-            for (int i = 0; i < rrCount; i++)
-            {
-                var receptionReportBytes = ReceptionReports[i].GetBytes();
-                Buffer.BlockCopy(receptionReportBytes, 0, buffer, bufferIndex, ReceptionReportSample.PAYLOAD_SIZE);
-                bufferIndex += ReceptionReportSample.PAYLOAD_SIZE;
-            }
-
+            byte[] buffer = new byte[Length];
+            WriteTo(buffer);
             return buffer;
         }
     }

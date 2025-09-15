@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------------
 // Filename: RTCPReceiverReport.cs
 //
 // Description:
@@ -59,6 +59,12 @@ namespace SIPSorcery.Net
         public RTCPHeader Header;
         public uint SSRC;
         public List<ReceptionReportSample> ReceptionReports;
+        /// <summary>
+        /// Gets the total size of the serialised packet in bytes.
+        /// </summary>
+        public int PacketSize =>
+            RTCPHeader.HEADER_BYTES_LENGTH + 4 + (ReceptionReports?.Count ?? 0) * ReceptionReportSample.PAYLOAD_SIZE;
+
 
         /// <summary>
         /// Creates a new RTCP Reception Report payload.
@@ -97,36 +103,51 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
-        /// Gets the serialised bytes for this Receiver Report.
+        /// Serialises the RTCP Receiver Report into a new byte array.
         /// </summary>
-        /// <returns>A byte array.</returns>
+        /// <returns>A new byte array containing the serialised report.</returns>
         public byte[] GetBytes()
         {
-            int rrCount = (ReceptionReports != null) ? ReceptionReports.Count : 0;
-            byte[] buffer = new byte[RTCPHeader.HEADER_BYTES_LENGTH + 4 + rrCount * ReceptionReportSample.PAYLOAD_SIZE];
-            Header.SetLength((ushort)(buffer.Length / 4 - 1));
-
-            Buffer.BlockCopy(Header.GetBytes(), 0, buffer, 0, RTCPHeader.HEADER_BYTES_LENGTH);
-            int payloadIndex = RTCPHeader.HEADER_BYTES_LENGTH;
-
-            if (BitConverter.IsLittleEndian)
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(SSRC)), 0, buffer, payloadIndex, 4);
-            }
-            else
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(SSRC), 0, buffer, payloadIndex, 4);
-            }
-
-            int bufferIndex = payloadIndex + 4;
-            for (int i = 0; i < rrCount; i++)
-            {
-                var receptionReportBytes = ReceptionReports[i].GetBytes();
-                Buffer.BlockCopy(receptionReportBytes, 0, buffer, bufferIndex, ReceptionReportSample.PAYLOAD_SIZE);
-                bufferIndex += ReceptionReportSample.PAYLOAD_SIZE;
-            }
-
+            byte[] buffer = new byte[PacketSize];
+            WriteTo(buffer);
             return buffer;
+        }
+
+        /// <summary>
+        /// Serialises the RTCP Receiver Report into a provided buffer.
+        /// </summary>
+        /// <param name="buffer">The buffer to write the report into.</param>
+        /// <returns>The number of bytes written to the buffer.</returns>
+        public int WriteTo(Span<byte> buffer)
+        {
+            int requiredSize = PacketSize;
+            if (buffer.Length < requiredSize)
+            {
+                throw new ArgumentException($"The buffer is too small for the RTCP Receiver Report. Required {requiredSize}, available {buffer.Length}.", nameof(buffer));
+            }
+
+            // The length field in the RTCP header is the packet length in 32-bit words minus one.
+            Header.Length = (ushort)(requiredSize / 4 - 1);
+            Header.ReceptionReportCount = ReceptionReports?.Count ?? 0;
+
+            // Write the header.
+            Header.WriteTo(buffer);
+
+            // Write the SSRC.
+            BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(4), SSRC);
+
+            // Write the reception report blocks.
+            if (ReceptionReports != null && ReceptionReports.Count > 0)
+            {
+                int offset = 8; // Start after header and SSRC.
+                foreach (var report in ReceptionReports)
+                {
+                    report.WriteTo(buffer.Slice(offset));
+                    offset += ReceptionReportSample.PAYLOAD_SIZE;
+                }
+            }
+
+            return requiredSize;
         }
     }
 }

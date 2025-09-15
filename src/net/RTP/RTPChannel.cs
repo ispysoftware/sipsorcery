@@ -27,7 +27,7 @@ using SIPSorcery.Sys;
 
 namespace SIPSorcery.Net
 {
-    public delegate void PacketReceivedDelegate(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> packet);
+    public delegate void PacketReceivedDelegate(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, Memory<byte> packet);
 
     /// <summary>
     /// A basic UDP socket manager. The RTP channel may need both an RTP and Control socket. This class encapsulates
@@ -131,37 +131,7 @@ namespace SIPSorcery.Net
             {
                 m_isRunningReceive = true;
                 EndPoint recvEndPoint = m_addressFamily == AddressFamily.InterNetwork ? IPv4AnyEndPoint : IPv6AnyEndPoint;
-#if FALSE // NET6_0_OR_GREATER bandwidth test falters at some point if this is enabled
-                var recive = m_socket.ReceiveFromAsync(m_recvBuffer.AsMemory(), SocketFlags.None, recvEndPoint);
-                if (recive.IsCompleted)
-                {
-                    try
-                    {
-                        var result = recive.GetAwaiter().GetResult();
-                        EndReceiveFrom(result);
-                    }
-                    catch (Exception excp)
-                    {
-                        EndReceiveFrom(excp);
-                    }
-                }
-                else
-                {
-                    recive.AsTask().ContinueWith(t =>
-                    {
-                        try
-                        {
-                            EndReceiveFrom(t.GetAwaiter().GetResult());
-                        }
-                        catch (Exception excp)
-                        {
-                            EndReceiveFrom(excp);
-                        }
-                    });
-                }
-#else
                 m_socket.BeginReceiveFrom(m_recvBuffer, 0, m_recvBuffer.Length, SocketFlags.None, ref recvEndPoint, endReceiveFrom, null);
-#endif
             }
             // Thrown when socket is closed. Can be safely ignored.
             // This exception can be thrown in response to an ICMP packet. The problem is the ICMP packet can be a false positive.
@@ -283,33 +253,25 @@ namespace SIPSorcery.Net
         {
             if (bytesRead > 0)
             {
-                // During experiments IPPacketInformation wasn't getting set on Linux. Without it the local IP address
-                // cannot be determined when a listener was bound to IPAddress.Any (or IPv6 equivalent). If the caller
-                // is relying on getting the local IP address on Linux then something may fail.
-                //if (packetInfo != null && packetInfo.Address != null)
-                //{
-                //    localEndPoint = new IPEndPoint(packetInfo.Address, localEndPoint.Port);
-                //}
-
+                // Limit check to prevent processing excessively large packets.
                 if (bytesRead < 256 * 1024)
                 {
-                    Span<byte> packetBuffer = stackalloc byte[bytesRead];
-                    CallOnPacketReceivedCallback(m_localEndPoint.Port, remoteEP as IPEndPoint, m_recvBuffer.AsSpan().Slice(0, bytesRead));
+                    // 1. Get a Memory<byte> slice from the main receive buffer.
+                    Memory<byte> packet = m_recvBuffer.AsMemory().Slice(0, bytesRead);
+
+                    // 2. Call the callback with the new Memory<byte> packet.
+                    CallOnPacketReceivedCallback(m_localEndPoint.Port, remoteEP as IPEndPoint, packet);
                 }
                 else
                 {
-                    logger.LogCritical("UDP packet received was larger than 256KB and was ignored.");
+                    logger.LogCritical($"UDP packet received was larger than 256KB ({bytesRead} bytes) and was ignored.");
                 }
             }
         }
 
         private void Drain()
         {
-            // If there is still data available it should be read now. This is more efficient than calling
-            // BeginReceiveFrom which will incur the overhead of creating the callback and then immediately firing it.
-            // It also avoids the situation where if the application cannot keep up with the network then BeginReceiveFrom
-            // will be called synchronously (if data is available it calls the callback method immediately) which can
-            // create a very nasty stack.
+            // This loop efficiently clears all pending data from the socket's buffer.
             while (!m_isClosed && m_socket.Available > 0)
             {
                 EndPoint remoteEP = m_addressFamily == AddressFamily.InterNetwork ? IPv4AnyEndPoint : IPv6AnyEndPoint;
@@ -317,13 +279,15 @@ namespace SIPSorcery.Net
 
                 if (bytesReadSync > 0)
                 {
-                    byte[] packetBufferSync = new byte[bytesReadSync];
-                    // TODO: When .NET Framework support is dropped switch to using a slice instead of a copy.
-                    Buffer.BlockCopy(m_recvBuffer, 0, packetBufferSync, 0, bytesReadSync);
-                    CallOnPacketReceivedCallback(m_localEndPoint.Port, remoteEP as IPEndPoint, packetBufferSync);
+                    // Create a lightweight slice pointing to the data in the main buffer. No copy!
+                    Memory<byte> packet = m_recvBuffer.AsMemory().Slice(0, bytesReadSync);
+
+                    // Pass the slice directly to the callback.
+                    CallOnPacketReceivedCallback(m_localEndPoint.Port, remoteEP as IPEndPoint, packet);
                 }
                 else
                 {
+                    // If ReceiveFrom returns 0 or less, stop draining.
                     break;
                 }
             }
@@ -343,7 +307,7 @@ namespace SIPSorcery.Net
             }
         }
 
-        protected virtual void CallOnPacketReceivedCallback(int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> packet)
+        protected virtual void CallOnPacketReceivedCallback(int localPort, IPEndPoint remoteEndPoint, Memory<byte> packet)
         {
             OnPacketReceived?.Invoke(this, localPort, remoteEndPoint, packet);
         }
@@ -439,7 +403,7 @@ namespace SIPSorcery.Net
             get { return m_isClosed; }
         }
 
-        public delegate void DataReceivedDelegate(int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> buffer);
+        public delegate void DataReceivedDelegate(int localPort, IPEndPoint remoteEndPoint, Memory<byte> buffer);
 
         public event DataReceivedDelegate OnRTPDataReceived;
         public event DataReceivedDelegate OnControlDataReceived;
@@ -615,7 +579,6 @@ namespace SIPSorcery.Net
                         m_rtpReceiver.BeginReceiveFrom();
                     }
 
-#if NET6_0_OR_GREATER
                     var tmp = ArrayPool<byte>.Shared.Rent(buffer.Length);
                     buffer.CopyTo(tmp);
                     ValueTask<int> send;
@@ -654,10 +617,6 @@ namespace SIPSorcery.Net
                             }
                         });
                     }
-
-#else
-                    sendSocket.BeginSendTo(buffer.ToArray(), 0, buffer.Length, SocketFlags.None, dstEndPoint, endSendTo, sendSocket);
-#endif
                     return SocketError.Success;
                 }
                 catch (ObjectDisposedException) // Thrown when socket is closed. Can be safely ignored.
@@ -740,7 +699,7 @@ namespace SIPSorcery.Net
         /// <param name="localPort">The local port it was received on.</param>
         /// <param name="remoteEndPoint">The remote end point of the sender.</param>
         /// <param name="packet">The raw packet received (note this may not be RTP if other protocols are being multiplexed).</param>
-        protected virtual void OnRTPPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> packet)
+        protected virtual void OnRTPPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, Memory<byte> packet)
         {
             if (packet.Length > 0)
             {
@@ -756,7 +715,7 @@ namespace SIPSorcery.Net
         /// <param name="localPort">The local port it was received on.</param>
         /// <param name="remoteEndPoint">The remote end point of the sender.</param>
         /// <param name="packet">The raw packet received which should always be an RTCP packet.</param>
-        private void OnControlPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> packet)
+        private void OnControlPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, Memory<byte> packet)
         {
             LastControlDestination = remoteEndPoint;
             OnControlDataReceived?.Invoke(localPort, remoteEndPoint, packet);

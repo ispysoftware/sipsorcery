@@ -14,8 +14,10 @@
 //-----------------------------------------------------------------------------
 
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using Concentus;
 using Concentus.Enums;
 using Microsoft.Extensions.Logging;
@@ -107,7 +109,14 @@ namespace SIPSorcery.Media
             _supportedFormats = supportedFormats.ToList();
         }
 
-        public byte[] EncodeAudio(short[] pcm, AudioFormat format)
+        /// <summary>
+        /// Encodes PCM audio samples into a destination buffer.
+        /// </summary>
+        /// <param name="pcm">The input PCM audio samples.</param>
+        /// <param name="destination">The buffer to write the encoded audio into.</param>
+        /// <param name="format">The audio format and codec to use for encoding.</param>
+        /// <returns>The number of bytes written to the destination buffer, or 0 if the buffer was too small.</returns>
+        public int EncodeAudio(ReadOnlySpan<short> pcm, Span<byte> destination, AudioFormat format)
         {
             if (format.Codec == AudioCodecsEnum.G722)
             {
@@ -117,43 +126,68 @@ namespace SIPSorcery.Media
                     _g722CodecState = new G722CodecState(G722_BIT_RATE, G722Flags.None);
                 }
 
-                int outputBufferSize = pcm.Length / 2;
-                byte[] encodedSample = new byte[outputBufferSize];
-                int res = _g722Codec.Encode(_g722CodecState, encodedSample, pcm, pcm.Length);
+                int requiredBytes = pcm.Length / 2;
+                if (destination.Length < requiredBytes) return 0;
 
-                return encodedSample;
+                // Assuming the G722Codec library can write to a Span or array segment.
+                // You may need to create a temporary array if it only takes `byte[]`.
+                var encodedLength = _g722Codec.Encode(_g722CodecState, destination, pcm);
+                return encodedLength;
             }
             else if (format.Codec == AudioCodecsEnum.G729)
             {
+                // This codec likely returns a new byte[], so we copy it.
+                // This is an exception to the zero-allocation goal due to the library's design.
                 if (_g729Encoder == null)
                 {
                     _g729Encoder = new G729Encoder();
                 }
+                ReadOnlySpan<byte> pcmBytes = MemoryMarshal.AsBytes(pcm);
+                byte[] encoded = _g729Encoder.Process(pcmBytes.ToArray());
 
-                byte[] pcmBytes = new byte[pcm.Length * sizeof(short)];
-                Buffer.BlockCopy(pcm, 0, pcmBytes, 0, pcmBytes.Length);
-                return _g729Encoder.Process(pcmBytes);
+                if (destination.Length < encoded.Length) return 0;
+
+                encoded.AsSpan().CopyTo(destination);
+                return encoded.Length;
             }
             else if (format.Codec == AudioCodecsEnum.PCMA)
             {
-                return pcm.Select(x => ALawEncoder.LinearToALawSample(x)).ToArray();
+                if (destination.Length < pcm.Length) return 0;
+
+                for (int i = 0; i < pcm.Length; i++)
+                {
+                    destination[i] = ALawEncoder.LinearToALawSample(pcm[i]);
+                }
+                return pcm.Length;
             }
             else if (format.Codec == AudioCodecsEnum.PCMU)
             {
-                return pcm.Select(x => MuLawEncoder.LinearToMuLawSample(x)).ToArray();
+                if (destination.Length < pcm.Length) return 0;
+
+                for (int i = 0; i < pcm.Length; i++)
+                {
+                    destination[i] = MuLawEncoder.LinearToMuLawSample(pcm[i]);
+                }
+                return pcm.Length;
             }
             else if (format.Codec == AudioCodecsEnum.L16)
             {
-                // When netstandard2.1 can be used.
-                //return MemoryMarshal.Cast<short, byte>(pcm)
+                int requiredBytes = pcm.Length * 2;
+                if (destination.Length < requiredBytes) return 0;
 
-                // Put on the wire in network byte order (big endian).
-                return pcm.SelectMany(x => new byte[] { (byte)(x >> 8), (byte)(x) }).ToArray();
+                for (int i = 0; i < pcm.Length; i++)
+                {
+                    BinaryPrimitives.WriteInt16BigEndian(destination.Slice(i * 2), pcm[i]);
+                }
+                return requiredBytes;
             }
             else if (format.Codec == AudioCodecsEnum.PCM_S16LE)
             {
-                // Put on the wire as little endian.
-                return pcm.SelectMany(x => new byte[] { (byte)(x), (byte)(x >> 8) }).ToArray();
+                var pcmBytes = MemoryMarshal.AsBytes(pcm);
+                if (destination.Length < pcmBytes.Length) return 0;
+
+                pcmBytes.CopyTo(destination);
+                return pcmBytes.Length;
             }
             else if (format.Codec == AudioCodecsEnum.OPUS)
             {
@@ -165,15 +199,17 @@ namespace SIPSorcery.Media
 
                 if (pcm.Length > _opusEncoder.NumChannels * OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL)
                 {
-                    logger.LogWarning("{audioEncoder} input sample of length {inputSize} supplied to OPUS encoder exceeded maximum limit of {maxLimit}. Reduce sampling period.", nameof(AudioEncoder), pcm.Length, _opusEncoder.NumChannels * OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL);
-                    return [];
+                    logger.LogWarning("OPUS input sample exceeded maximum limit.");
+                    return 0;
                 }
-                else
-                {
-                    Span<byte> encodedSample = stackalloc byte[OPUS_MAXIMUM_ENCODED_FRAME_SIZE];
-                    int encodedLength = _opusEncoder.Encode(pcm, pcm.Length / _opusEncoder.NumChannels, encodedSample, encodedSample.Length);
-                    return encodedSample.Slice(0, encodedLength).ToArray();
-                }
+
+                Span<byte> tempBuffer = stackalloc byte[OPUS_MAXIMUM_ENCODED_FRAME_SIZE];
+                int encodedLength = _opusEncoder.Encode(pcm, pcm.Length / _opusEncoder.NumChannels, tempBuffer, tempBuffer.Length);
+
+                if (destination.Length < encodedLength) return 0;
+
+                tempBuffer.Slice(0, encodedLength).CopyTo(destination);
+                return encodedLength;
             }
             else
             {

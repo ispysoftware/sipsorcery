@@ -2279,9 +2279,9 @@ namespace SIPSorcery.Net
         /// <param name="durationRtpUnits">The duration in RTP timestamp units of the audio sample. This
         /// value is added to the previous RTP timestamp when building the RTP header.</param>
         /// <param name="sample">The audio sample to set as the RTP packet payload.</param>
-        public void SendAudio(uint durationRtpUnits, byte[] sample)
+        public void SendAudio(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
         {
-            AudioStream?.SendAudio(durationRtpUnits, sample);
+            AudioStream?.SendAudio(durationRtpUnits, sample.Span);
         }
 
         /// <summary>
@@ -2290,7 +2290,7 @@ namespace SIPSorcery.Net
         /// <param name="durationRtpUnits">The duration in RTP timestamp units of the video sample. This
         /// value is added to the previous RTP timestamp when building the RTP header.</param>
         /// <param name="sample">The video sample to set as the RTP packet payload.</param>
-        public void SendVideo(uint durationRtpUnits, byte[] sample)
+        public void SendVideo(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
         {
             VideoStream?.SendVideo(durationRtpUnits, sample);
         }
@@ -2373,17 +2373,17 @@ namespace SIPSorcery.Net
             }
         }
 
-        protected void OnReceive(int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> buffer)
+        protected void OnReceive(int localPort, IPEndPoint remoteEndPoint, Memory<byte> buffer)
         {
             if (remoteEndPoint.Address.IsIPv4MappedToIPv6)
             {
-                // Required for matching existing RTP end points (typically set from SDP) and
-                // whether or not the destination end point should be switched.
                 remoteEndPoint.Address = remoteEndPoint.Address.MapToIPv4();
             }
 
-            // Quick sanity check on whether this is not an RTP or RTCP packet.
-            if (buffer.Length > RTPHeader.MIN_HEADER_LEN && buffer[0] >= 128 && buffer[0] <= 191)
+            // Quick sanity check on the buffer.
+            // We check the span for performance, as it doesn't create a new object.
+            var span = buffer.Span;
+            if (span.Length > RTPHeader.MIN_HEADER_LEN && span[0] >= 128 && span[0] <= 191)
             {
                 if ((rtpSessionConfig.IsSecure || rtpSessionConfig.UseSdpCryptoNegotiation) && !IsSecureContextReady())
                 {
@@ -2391,62 +2391,48 @@ namespace SIPSorcery.Net
                 }
                 else
                 {
-                    if (Enum.IsDefined(typeof(RTCPReportTypesEnum), buffer[1]))
+                    // Check if the packet is RTCP.
+                    if (Enum.IsDefined(typeof(RTCPReportTypesEnum), span[1]))
                     {
-                        // Only call OnReceiveRTCPPacket for supported RTCPCompoundPacket types
-                        if (buffer[1] == (byte)RTCPReportTypesEnum.SR ||
-                            buffer[1] == (byte)RTCPReportTypesEnum.RR ||
-                            buffer[1] == (byte)RTCPReportTypesEnum.SDES ||
-                            buffer[1] == (byte)RTCPReportTypesEnum.BYE ||
-                            buffer[1] == (byte)RTCPReportTypesEnum.PSFB ||
-                            buffer[1] == (byte)RTCPReportTypesEnum.RTPFB)
-                        {
-                            OnReceiveRTCPPacket(localPort, remoteEndPoint, buffer);
-                        }
+                        // Note: Not all RTCP packet types are part of a compound packet.
+                        // This logic correctly dispatches the buffer to the RTCP handler.
+                        OnReceiveRTCPPacket(localPort, remoteEndPoint, buffer);
                     }
                     else
                     {
+                        // This is an RTP packet.
                         OnReceiveRTPPacket(localPort, remoteEndPoint, buffer);
                     }
                 }
             }
         }
 
-        private void OnReceiveRTCPPacket(int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> bufferRO)
+        private void OnReceiveRTCPPacket(int localPort, IPEndPoint remoteEndPoint, Memory<byte> buffer)
         {
-            //logger.LogDebug($"RTCP packet received from {remoteEndPoint} {buffer.HexStr()}");
-
-            #region RTCP packet.
-
-            Span<byte> buffer = stackalloc byte[bufferRO.Length];
-            bufferRO.CopyTo(buffer);
-            // Get the SSRC in order to be able to figure out which media type 
-            // This will let us choose the apropriate unprotect methods
-            uint ssrc = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(4));
-
+            // Get the SSRC to find the correct security context for SRTCP.
+            uint ssrc = BinaryPrimitives.ReadUInt32BigEndian(buffer.Span.Slice(4));
             MediaStream mediaStream = GetMediaStream(ssrc);
             var secureContext = mediaStream?.GetSecurityContext() ?? PrimaryStream?.GetSecurityContext();
+
+            Memory<byte> packetBuffer = buffer; // Start with the original buffer.
+
             if (secureContext != null)
             {
-                int res = secureContext.UnprotectRtcpPacket(buffer, buffer.Length, out int outBufLen);
+                // Unprotect the buffer in-place.
+                int res = secureContext.UnprotectRtcpPacket(packetBuffer.Span, packetBuffer.Length, out int outBufLen);
                 if (res != 0)
                 {
-                    logger.LogWarning($"SRTCP unprotect failed for {PrimaryStream.MediaType} track, result {res}.");
+                    logger.LogWarning($"SRTCP unprotect failed for {mediaStream?.MediaType} track, result {res}.");
                     return;
                 }
-                else
-                {
-                    buffer = buffer.Slice(0, outBufLen);
-                }
+
+                // The unprotected packet is now a shorter slice of the same buffer.
+                packetBuffer = packetBuffer.Slice(0, outBufLen);
             }
 
-
-            var rtcpPkt = new RTCPCompoundPacket(buffer);
-            if (rtcpPkt == null)
-            {
-                logger.LogWarning("Failed to parse RTCP compound report.");
-                return;
-            }
+            // Create the compound packet by parsing the (potentially unprotected) buffer.
+            // This call now works because the constructor accepts a Span.
+            var rtcpPkt = new RTCPCompoundPacket(packetBuffer.Span);
 
             mediaStream = GetMediaStream(rtcpPkt);
             if (rtcpPkt.Bye != null)
@@ -2503,33 +2489,30 @@ namespace SIPSorcery.Net
                     //logger.LogTrace(rtcpPkt.GetDebugSummary());
                 }
             }
-
-
-            #endregion
         }
 
-        private void OnReceiveRTPPacket(int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> bufferRO)
+        private void OnReceiveRTPPacket(int localPort, IPEndPoint remoteEndPoint, Memory<byte> buffer)
         {
             if (!IsClosed)
             {
-                var hdr = new RTPHeader(bufferRO);
+                // 1. Parse the header directly from the original buffer.
+                // The RTPHeader constructor takes a ReadOnlyMemory<byte>, which is easily
+                // obtained from our Memory<byte> input.
+                var hdr = new RTPHeader(buffer);
+                hdr.ReceivedTime = DateTime.UtcNow; // Set the received time.
 
                 MediaStream mediaStream = GetMediaStream(hdr.SyncSource);
 
-                if ((mediaStream == null) && (AudioStreamList.Count < 2) && (VideoStreamList.Count < 2))
+                if (mediaStream == null && AudioStreamList.Count < 2 && VideoStreamList.Count < 2)
                 {
                     mediaStream = GetMediaStreamFromPayloadType(hdr.PayloadType);
                 }
 
                 if (mediaStream == null)
                 {
-                    logger.LogWarning($"An RTP packet with SSRC {hdr.SyncSource} and payload ID {hdr.PayloadType} was received that could not be matched to an audio or video stream.");
+                    logger.LogWarning($"An RTP packet with SSRC {hdr.SyncSource} and payload ID {hdr.PayloadType} was received that could not be matched to a stream.");
                     return;
                 }
-
-                hdr.ReceivedTime = DateTime.Now;
-                Span<byte> buffer = stackalloc byte[bufferRO.Length];
-                bufferRO.CopyTo(buffer);
                 mediaStream.OnReceiveRTPPacket(hdr, localPort, remoteEndPoint, buffer);
             }
         }

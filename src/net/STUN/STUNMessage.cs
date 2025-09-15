@@ -90,42 +90,47 @@ namespace SIPSorcery.Net
             Attributes.Add(xorAddressAttribute);
         }
 
-        public static STUNMessage ParseSTUNMessage(ReadOnlySpan<byte> buffer, int bufferLength)
+        public static STUNMessage ParseSTUNMessage(ReadOnlyMemory<byte> buffer)
         {
-            if (buffer != null && buffer.Length > 0 && buffer.Length >= bufferLength)
+            // The IsEmpty check replaces the old, more complex check.
+            if (buffer.IsEmpty)
             {
-                STUNMessage stunMessage = new STUNMessage();
-                stunMessage._receivedBuffer = buffer.Slice(0, bufferLength).ToArray();
-                stunMessage.Header = STUNHeader.ParseSTUNHeader(buffer);
-
-                if (stunMessage.Header.MessageLength > 0)
-                {
-                    STUNAttribute.TryParseMessageAttributes(stunMessage.Attributes, buffer, STUNHeader.STUN_HEADER_LENGTH, bufferLength, stunMessage.Header);
-                }
-
-                if (stunMessage.Attributes.Count > 0 && stunMessage.Attributes.Last().AttributeType == STUNAttributeTypesEnum.FingerPrint)
-                {
-                    // Check fingerprint.
-                    var fingerprintAttribute = stunMessage.Attributes.Last();
-
-                    var input = buffer.Slice(0, buffer.Length - STUNAttribute.STUNATTRIBUTE_HEADER_LENGTH - FINGERPRINT_ATTRIBUTE_CRC32_LENGTH);
-
-                    uint crc = Crc32.Compute(input) ^ FINGERPRINT_XOR;
-                    byte[] fingerPrint = (BitConverter.IsLittleEndian) ? BitConverter.GetBytes(NetConvert.DoReverseEndian(crc)) : BitConverter.GetBytes(crc);
-
-                    //logger.LogDebug($"STUNMessage supplied fingerprint attribute: {fingerprintAttribute.Value.HexStr()}.");
-                    //logger.LogDebug($"STUNMessage calculated fingerprint attribute: {fingerPrint.HexStr()}.");
-
-                    if (fingerprintAttribute.Value.HexStr() == fingerPrint.HexStr())
-                    {
-                        stunMessage.isFingerprintValid = true;
-                    }
-                }
-
-                return stunMessage;
+                return null;
             }
 
-            return null;
+            // Get a Span for all synchronous processing within this method.
+            ReadOnlySpan<byte> bufferSpan = buffer.Span;
+
+            STUNMessage stunMessage = new STUNMessage();
+
+            // This copy is still here for lifetime reasons, as discussed.
+            stunMessage._receivedBuffer = buffer.ToArray();
+            stunMessage.Header = STUNHeader.ParseSTUNHeader(bufferSpan);
+
+            if (stunMessage.Header.MessageLength > 0)
+            {
+                // Use buffer.Length instead of the old bufferLength parameter.
+                STUNAttribute.TryParseMessageAttributes(stunMessage.Attributes, bufferSpan,
+                    STUNHeader.STUN_HEADER_LENGTH, buffer.Length, stunMessage.Header);
+            }
+
+            if (stunMessage.Attributes.Count > 0 && stunMessage.Attributes[stunMessage.Attributes.Count - 1].AttributeType == STUNAttributeTypesEnum.FingerPrint)
+            {
+                var fingerprintAttribute = stunMessage.Attributes[stunMessage.Attributes.Count - 1];
+
+                var input = bufferSpan.Slice(0, buffer.Length - STUNAttribute.STUNATTRIBUTE_HEADER_LENGTH - FINGERPRINT_ATTRIBUTE_CRC32_LENGTH);
+
+                uint crc = Crc32.Compute(input) ^ FINGERPRINT_XOR;
+                Span<byte> calculatedFingerprint = stackalloc byte[4];
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(calculatedFingerprint, crc);
+
+                if (fingerprintAttribute.Value.AsSpan().SequenceEqual(calculatedFingerprint))
+                {
+                    stunMessage.isFingerprintValid = true;
+                }
+            }
+
+            return stunMessage;
         }
 
         public byte[] ToByteBufferStringKey(string messageIntegrityKey, bool addFingerprint)

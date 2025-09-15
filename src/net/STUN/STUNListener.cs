@@ -22,7 +22,7 @@ using SIPSorcery.Sys;
 
 namespace SIPSorcery.Net
 {
-    public delegate void STUNMessageReceived(IPEndPoint receivedEndPoint, IPEndPoint receivedOnEndPoint, byte[] buffer, int bufferLength);
+    public delegate void STUNMessageReceived(IPEndPoint receivedEndPoint, IPEndPoint receivedOnEndPoint, ReadOnlyMemory<byte> buffer);
 
     public class STUNListener
     {
@@ -125,7 +125,7 @@ namespace SIPSorcery.Net
                         {
                             try
                             {
-                                MessageReceived(m_localEndPoint, inEndPoint, buffer, buffer.Length);
+                                MessageReceived(m_localEndPoint, inEndPoint, buffer);
                             }
                             catch (Exception excp)
                             {

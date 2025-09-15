@@ -66,14 +66,14 @@ namespace SIPSorcery.Net
             logger.LogDebug("STUN Server additional sockets, primary={PrimaryEndPoint}, secondary={SecondaryEndPoint}.", IPSocket.GetSocketString(m_primaryDiffPortEndPoint), IPSocket.GetSocketString(m_secondaryDiffPortEndPoint));
         }
 
-        public void STUNPrimaryReceived(IPEndPoint localEndPoint, IPEndPoint receivedEndPoint, byte[] buffer, int bufferLength)
+        public void STUNPrimaryReceived(IPEndPoint localEndPoint, IPEndPoint receivedEndPoint, ReadOnlyMemory<byte> buffer)
         {
             try
             {
                 //Console.WriteLine("\n=> received from " + IPSocketAddress.GetSocketString(receivedEndPoint) + " on " + IPSocketAddress.GetSocketString(receivedOnEndPoint));
                 //Console.WriteLine(Utility.PrintBuffer(buffer));
 
-                STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer, bufferLength);
+                STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer);
                 //Console.WriteLine(stunRequest.ToString());
 
                 FireSTUNPrimaryRequestInTraceEvent(localEndPoint, receivedEndPoint, stunRequest);
@@ -135,14 +135,14 @@ namespace SIPSorcery.Net
             }
         }
 
-        public void STUNSecondaryReceived(IPEndPoint localEndPoint, IPEndPoint receivedEndPoint, byte[] buffer, int bufferLength)
+        public void STUNSecondaryReceived(IPEndPoint localEndPoint, IPEndPoint receivedEndPoint, ReadOnlyMemory<byte> buffer)
         {
             try
             {
                 //Console.WriteLine("\n=> received from " + IPSocketAddress.GetSocketString(receivedEndPoint) + " on " + IPSocketAddress.GetSocketString(receivedOnEndPoint));
                 //Console.WriteLine(Utility.PrintBuffer(buffer));
 
-                STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer, bufferLength);
+                STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer);
                 //Console.WriteLine(stunRequest.ToString());
 
                 FireSTUNSecondaryRequestInTraceEvent(localEndPoint, receivedEndPoint, stunRequest);

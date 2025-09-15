@@ -1312,34 +1312,30 @@ namespace SIPSorcery.Net
         /// <paramref name="localPort">The local port on the RTP socket that received the packet.</paramref>
         /// <param name="remoteEP">The remote end point the packet was received from.</param>
         /// <param name="buffer">The data received.</param>
-        private void OnRTPDataReceived(int localPort, IPEndPoint remoteEP, ReadOnlySpan<byte> buffer)
+        private void OnRTPDataReceived(int localPort, IPEndPoint remoteEP, Memory<byte> buffer)
         {
-            //logger.LogDebug($"RTP channel received a packet from {remoteEP}, {buffer?.Length} bytes.");
-
-            // By this point the RTP ICE channel has already processed any STUN packets which means 
-            // it's only necessary to separate RTP/RTCP from DTLS.
-            // Because DTLS packets can be fragmented and RTP/RTCP should never be, use the RTP/RTCP 
-            // prefix to distinguish.
-
-            if (buffer.Length > 0)
+            if (!buffer.IsEmpty)
             {
                 try
                 {
-                    if (buffer.Length > RTPHeader.MIN_HEADER_LEN && buffer[0] >= 128 && buffer[0] <= 191)
+                    // Get a temporary Span for fast, synchronous operations like indexing.
+                    ReadOnlySpan<byte> span = buffer.Span;
+
+                    if (span.Length > RTPHeader.MIN_HEADER_LEN && span[0] >= 128 && span[0] <= 191)
                     {
-                        // RTP/RTCP packet.
+                        // RTP/RTCP packet. The 'buffer' is already a Memory<byte>, so this call is now valid.
                         base.OnReceive(localPort, remoteEP, buffer);
                     }
                     else
                     {
                         if (_dtlsHandle != null)
                         {
-                            //logger.LogDebug($"DTLS transport received {buffer.Length} bytes from {AudioDestinationEndPoint}.");
-                            _dtlsHandle.WriteToRecvStream(buffer);
+                            // Pass the Span to the DTLS handler.
+                            _dtlsHandle.WriteToRecvStream(span);
                         }
                         else
                         {
-                            logger.LogWarning($"DTLS packet received {buffer.Length} bytes from {remoteEP} but no DTLS transport available.");
+                            logger.LogWarning($"DTLS packet received {span.Length} bytes from {remoteEP} but no DTLS transport available.");
                         }
                     }
                 }

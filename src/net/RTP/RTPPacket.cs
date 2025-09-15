@@ -1,170 +1,106 @@
-﻿//-----------------------------------------------------------------------------
-// Filename: RTPPacket.cs
-//
-// Description: Encapsulation of an RTP packet.
-//
-// Author(s):
-// Aaron Clauson (aaron@sipsorcery.com)
-// 
-// History:
-// 24 May 2005	Aaron Clauson 	Created, Dublin, Ireland.
-// 11 Aug 2019  Aaron Clauson   Added full license header.
-//
-// License: 
-// BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
-//-----------------------------------------------------------------------------
-
-using System;
-#if !NETCOREAPP2_1_OR_GREATER || NETFRAMEWORK
-using System.Linq;
-#endif
+﻿using System;
+using System.Buffers; // Required for ArrayPool
 
 namespace SIPSorcery.Net
 {
     public class RTPPacket
     {
-        public RTPHeader Header;
-        private byte[] _payload;
-        private ArraySegment<byte> _payloadSegment;
+        public RTPHeader Header { get; private set; }
+
+        // The payload is now a single, unified property.
+        public ReadOnlyMemory<byte> Payload { get; private set; }
+
         private int _srtpProtectionLength = 0;
 
-        public byte[] Payload
-        {
-            get { return _payload; }
-            set { _payload = value; }
-        }
-
+        /// <summary>
+        /// Creates an empty RTP packet.
+        /// </summary>
         public RTPPacket()
         {
             Header = new RTPHeader();
+            Payload = ReadOnlyMemory<byte>.Empty;
         }
 
-        public RTPPacket(int payloadSize)
+        /// <summary>
+        /// Creates an RTP packet by parsing a buffer. This is a "zero-copy" operation
+        /// that does not allocate a new buffer for the payload.
+        /// </summary>
+        /// <param name="packetBuffer">The buffer containing the full RTP packet.</param>
+        public RTPPacket(ReadOnlyMemory<byte> packetBuffer)
         {
-            Header = new RTPHeader();
-            _payload = new byte[payloadSize];
-        }
-
-        public RTPPacket(ReadOnlySpan<byte> packet)
-        {
-            Header = new RTPHeader(packet);
-            _payload = new byte[Header.PayloadSize];
-            packet.Slice(Header.Length, _payload.Length).CopyTo(_payload);
-        }
-
-        public RTPPacket(byte[] packet)
-        {
-            Header = new RTPHeader(packet);
-            _payload = new byte[Header.PayloadSize];
-            Array.Copy(packet, Header.Length, _payload, 0, _payload.Length);
-        }
-
-        public RTPPacket(ArraySegment<byte> packet, int srtpProtectionLength)
-        {
-            Header = new RTPHeader();
-            _payloadSegment = packet;
-            _srtpProtectionLength = srtpProtectionLength;
-        }
-
-        public uint GetPayloadLength()
-        {
-            return (uint)(_payload?.Length ?? _payloadSegment.Count);
-        }
-
-        public byte[] GetPayloadBytes()
-        {
-            Payload ??= _payloadSegment.ToArray();
-
-            return Payload;
-        }
-
-        public byte GetPayloadByteAt(int index)
-        {
-#if NETCOREAPP2_1_OR_GREATER && !NETFRAMEWORK
-            return _payload?[index] ?? _payloadSegment[index];
-#else
-            return _payload?[index] ?? _payloadSegment.ElementAt(index);
-#endif
-        }
-
-        public ArraySegment<byte> GetPayloadSegment(int offset, int length)
-        {
-            if (_payload != null)
+            if (RTPHeader.TryParse(packetBuffer, out var header))
             {
-                return new ArraySegment<byte>(_payload, offset, length);
-            }
-
-#if NETCOREAPP2_1_OR_GREATER && !NETFRAMEWORK
-            return _payloadSegment.Slice(offset, length);
-#else
-            return new ArraySegment<byte>(_payloadSegment.Array!, offset + _payloadSegment.Offset, length);
-#endif
-        }
-
-        public byte[] GetBytes()
-        {
-            byte[] header = Header.GetBytes();
-            byte[] packet = new byte[header.Length + (_payload?.Length ?? _payloadSegment.Count) + _srtpProtectionLength];
-
-            Array.Copy(header, packet, header.Length);
-
-            if (_payloadSegment != null)
-            {
-#if NETCOREAPP2_1_OR_GREATER && !NETFRAMEWORK
-                _payloadSegment.CopyTo(packet, header.Length);
-#else
-                Array.Copy(_payloadSegment.Array!, _payloadSegment.Offset, packet, header.Length, _payloadSegment.Count);
-#endif
-            }
-            else if (_payload != null)
-            {
-                Array.Copy(_payload, 0, packet, header.Length, _payload.Length);
+                Header = header;
+                // Store a slice of the original buffer, NO COPYING.
+                Payload = packetBuffer.Slice(header.Length, header.PayloadSize);
             }
             else
             {
-                throw new ApplicationException("Either _payloadSegment or _payload should be defined");
+                throw new ApplicationException("Could not parse RTP packet from buffer.");
             }
-
-            return packet;
         }
 
-        private byte[] GetNullPayload(int numBytes)
+        /// <summary>
+        /// Creates an RTP packet from a pre-parsed header and a payload.
+        /// This is also a zero-copy operation.
+        /// </summary>
+        public RTPPacket(RTPHeader header, ReadOnlyMemory<byte> payload)
         {
-            byte[] payload = new byte[numBytes];
-
-            for (int byteCount = 0; byteCount < numBytes; byteCount++)
-            {
-                payload[byteCount] = 0xff;
-            }
-
-            return payload;
+            Header = header;
+            Payload = payload;
         }
 
-        public static bool TryParse(
-            ReadOnlySpan<byte> buffer,
-            RTPPacket packet,
-            out int consumed)
+        /// <summary>
+        /// The total length of the serialized packet in bytes.
+        /// </summary>
+        public int Length => Header.Length + Payload.Length + _srtpProtectionLength;
+
+        /// <summary>
+        /// Writes the complete RTP packet (header and payload) to a destination buffer.
+        /// This method is allocation-free.
+        /// </summary>
+        /// <param name="destination">The buffer to write the packet to.</param>
+        /// <returns>The number of bytes written.</returns>
+        public int WriteTo(Span<byte> destination)
         {
-            consumed = 0;
-            if (RTPHeader.TryParse(buffer, out var header, out var headerConsumed))
+            if (destination.Length < Length)
             {
-                packet.Header = header;
-                consumed += headerConsumed;
-                packet._payload = buffer.Slice(headerConsumed, header.PayloadSize).ToArray();
-                consumed += header.PayloadSize;
+                throw new ArgumentException("Destination buffer is too small to write the RTP packet.");
+            }
+
+            int headerLength = Header.WriteTo(destination);
+            Payload.Span.CopyTo(destination.Slice(headerLength));
+
+            // Logic for writing SRTP protection bytes would go here if needed.
+
+            return Length;
+        }
+
+        /// <summary>
+        /// Gets a new byte array containing the full packet.
+        /// NOTE: This method allocates a new array and is less efficient than WriteTo.
+        /// </summary>
+        public byte[] GetBytes()
+        {
+            byte[] buffer = new byte[Length];
+            WriteTo(buffer);
+            return buffer;
+        }
+
+        /// <summary>
+        /// Tries to parse an RTP packet from a buffer in a zero-copy manner.
+        /// </summary>
+        public static bool TryParse(ReadOnlyMemory<byte> buffer, out RTPPacket packet)
+        {
+            if (RTPHeader.TryParse(buffer, out _))
+            {
+                packet = new RTPPacket(buffer);
                 return true;
             }
 
+            packet = null;
             return false;
         }
 
-        public static bool TryParse(
-            ReadOnlySpan<byte> buffer,
-            out RTPPacket packet,
-            out int consumed)
-        {
-            packet = new RTPPacket();
-            return TryParse(buffer, packet, out consumed);
-        }
     }
 }

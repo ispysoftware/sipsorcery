@@ -224,7 +224,7 @@ namespace SIPSorcery.Net
             LastActivityAt = DateTime.Now;
             IsTimedOut = false;
             PacketsReceivedCount++;
-            OctetsReceivedCount += rtpPacket.GetPayloadLength();
+            OctetsReceivedCount += (uint)rtpPacket.Payload.Length;
 
             if (m_receptionReport == null)
             {
@@ -254,12 +254,12 @@ namespace SIPSorcery.Net
         /// Event handler for an RTP packet being sent by the RTP session.
         /// Used for measuring transmission statistics.
         /// </summary>
-        public void RecordRtpPacketSend(RTPPacket rtpPacket)
+        public void RecordRtpPacketSend(int packetLength, ushort sequenceNumber, uint rtpTimestamp)
         {
             PacketsSentCount++;
-            OctetsSentCount += rtpPacket.GetPayloadLength();
-            LastSeqNum = rtpPacket.Header.SequenceNumber;
-            LastRtpTimestampSent = rtpPacket.Header.Timestamp;
+            OctetsSentCount += (uint)packetLength;
+            LastSeqNum = sequenceNumber;
+            LastRtpTimestampSent = rtpTimestamp;
             LastNtpTimestampSent = DateTimeToNtpTimestamp(DateTime.Now);
         }
 

@@ -561,21 +561,21 @@ namespace SIPSorcery.Media
 
         private void EncodeAndSend(short[] pcm, int pcmSampleRate)
         {
-            if (pcm.Length > 0)
-            {
-                if (pcmSampleRate != _audioFormatManager.SelectedFormat.ClockRate)
-                {
-                    pcm = PcmResampler.Resample(pcm, pcmSampleRate, _audioFormatManager.SelectedFormat.ClockRate);
-                }
+            //if (pcm.Length > 0)
+            //{
+            //    if (pcmSampleRate != _audioFormatManager.SelectedFormat.ClockRate)
+            //    {
+            //        pcm = PcmResampler.Resample(pcm, pcmSampleRate, _audioFormatManager.SelectedFormat.ClockRate);
+            //    }
 
-                byte[] encodedSample = _audioEncoder.EncodeAudio(pcm, _audioFormatManager.SelectedFormat);
+            //    byte[] encodedSample = _audioEncoder.EncodeAudio(pcm, _audioFormatManager.SelectedFormat);
 
-                uint rtpUnits = RtpTimestampExtensions.ToRtpUnits(_audioSamplePeriodMilliseconds, _audioFormatManager.SelectedFormat.RtpClockRate);
+            //    uint rtpUnits = RtpTimestampExtensions.ToRtpUnits(_audioSamplePeriodMilliseconds, _audioFormatManager.SelectedFormat.RtpClockRate);
 
-                OnAudioSourceEncodedSample?.Invoke(rtpUnits, encodedSample);
+            //    OnAudioSourceEncodedSample?.Invoke(rtpUnits, encodedSample);
 
-                OnAudioSourceEncodedFrameReady?.Invoke(new EncodedAudioFrame(-1, _audioFormatManager.SelectedFormat, (uint)_audioSamplePeriodMilliseconds, encodedSample));
-            }
+            //    OnAudioSourceEncodedFrameReady?.Invoke(new EncodedAudioFrame(-1, _audioFormatManager.SelectedFormat, (uint)_audioSamplePeriodMilliseconds, encodedSample));
+            //}
         }
 
         /// <summary>

@@ -82,27 +82,44 @@ namespace SIPSorcery.Net
             }
         }
 
-        public override byte[] Marshal()
+        /// <summary>
+        /// Writes the 1-byte CVO payload into the destination buffer.
+        /// </summary>
+        /// <param name="destination">The buffer to write the payload into.</param>
+        /// <returns>The number of bytes written (always 1 for this extension).</returns>
+        public override int Marshal(Span<byte> destination)
         {
-            return new[]
+            if (destination.Length < RTP_HEADER_EXTENSION_SIZE)
             {
-                (byte)((Id << 4) | ExtensionSize - 1),
-                _cvo_byte
-            };
+                throw new ArgumentException("Destination buffer is too small for the CVO payload.", nameof(destination));
+            }
+
+            // The cvo_byte is pre-calculated when Set is called.
+            destination[0] = _cvo_byte;
+
+            return RTP_HEADER_EXTENSION_SIZE;
         }
 
-        public override Object Unmarshal(RTPHeader header, byte[] data)
+        /// <summary>
+        /// Parses the 1-byte CVO payload from a buffer and updates the
+        /// internal CVO state.
+        /// </summary>
+        /// <param name="data">The buffer slice containing the 1-byte extension payload.</param>
+        public override void Unmarshal(ReadOnlySpan<byte> data)
         {
-            if (data?.Length == ExtensionSize)
+            if (data.Length != RTP_HEADER_EXTENSION_SIZE)
             {
-                var cvoByte = data[0];
-                if (_cvo_byte != cvoByte)
-                {
-                    _cvo_byte = cvoByte;
-                    _cvo = new CVO(_cvo_byte);
-                }
+                throw new ArgumentException($"Invalid CVO extension payload size, expected {RTP_HEADER_EXTENSION_SIZE} but got {data.Length}.");
             }
-            return _cvo;
+
+            byte cvoByte = data[0];
+
+            // Only create a new CVO object if the orientation has actually changed.
+            if (_cvo_byte != cvoByte)
+            {
+                _cvo_byte = cvoByte;
+                _cvo = new CVO(_cvo_byte);
+            }
         }
 
         /// <summary>

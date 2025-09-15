@@ -2608,36 +2608,67 @@ namespace SIPSorcery.Net
         /// <param name="localPort">The local port it was received on.</param>
         /// <param name="remoteEndPoint">The remote end point of the sender.</param>
         /// <param name="packet">The raw packet received (note this may not be RTP if other protocols are being multiplexed).</param>
-        protected override void OnRTPPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> packet)
+        protected override void OnRTPPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, Memory<byte> packet)
         {
-            if (packet.Length > 0)
+            if (packet.Length < 4) // Minimum length for STUN or RTP
             {
-                bool wasRelayed = false;
+                return;
+            }
 
-                if (packet[0] == 0x00 && packet[1] == 0x17)
+            var payload = packet;
+            var finalRemoteEndPoint = remoteEndPoint;
+            bool wasRelayed = false;
+
+            var packetSpan = packet.Span;
+
+            // 1. Check if the packet is a TURN Data Indication and extract the real payload.
+            if (packetSpan[0] == 0x00 && packetSpan[1] == 0x17)
+            {
+                wasRelayed = true;
+
+                // Assumes ParseSTUNMessage can now efficiently handle Memory<byte>
+                var dataIndication = STUNMessage.ParseSTUNMessage(packet);
+
+                STUNAttribute dataAttribute = null;
+                STUNXORAddressAttribute peerAddrAttribute = null;
+
+                // Use a simple loop instead of LINQ to avoid allocations.
+                foreach (var attr in dataIndication.Attributes)
                 {
-                    wasRelayed = true;
-
-                    // TURN data indication. Extract the data payload and adjust the end point.
-                    var dataIndication = STUNMessage.ParseSTUNMessage(packet, packet.Length);
-                    var dataAttribute = dataIndication.Attributes.Where(x => x.AttributeType == STUNAttributeTypesEnum.Data).FirstOrDefault();
-                    packet = dataAttribute?.Value;
-
-                    var peerAddrAttribute = dataIndication.Attributes.Where(x => x.AttributeType == STUNAttributeTypesEnum.XORPeerAddress).FirstOrDefault();
-                    remoteEndPoint = (peerAddrAttribute as STUNXORAddressAttribute)?.GetIPEndPoint();
+                    if (attr.AttributeType == STUNAttributeTypesEnum.Data)
+                        dataAttribute = attr;
+                    else if (attr.AttributeType == STUNAttributeTypesEnum.XORPeerAddress)
+                        peerAddrAttribute = attr as STUNXORAddressAttribute;
                 }
 
-                base.LastRtpDestination = remoteEndPoint;
-
-                if (packet[0] == 0x00 || packet[0] == 0x01)
+                if (dataAttribute != null && peerAddrAttribute != null)
                 {
-                    // STUN packet.
-                    var stunMessage = STUNMessage.ParseSTUNMessage(packet, packet.Length);
-                    _ = ProcessStunMessage(stunMessage, remoteEndPoint, wasRelayed);
+                    // The real payload is the data attribute's value.
+                    payload = dataAttribute.Value;
+                    finalRemoteEndPoint = peerAddrAttribute.GetIPEndPoint();
                 }
                 else
                 {
-                    OnRTPDataReceived?.Invoke(localPort, remoteEndPoint, packet);
+                    // Invalid TURN message, ignore it.
+                    return;
+                }
+            }
+
+            base.LastRtpDestination = finalRemoteEndPoint;
+
+            if (payload.Length > 0)
+            {
+                // 2. Check if the final payload is STUN or RTP by inspecting the first two bits.
+                if (payload.Span[0] == 0x00 || payload.Span[0] == 0x01)
+                {
+                    // A. It's a STUN Message (first two bits are 00).
+                    var stunMessage = STUNMessage.ParseSTUNMessage(payload);
+                    _ = ProcessStunMessage(stunMessage, finalRemoteEndPoint, wasRelayed);
+                }
+                else
+                {
+                    // B. Assume it's an RTP Packet (first two bits are typically 10).
+                    OnRTPDataReceived?.Invoke(localPort, finalRemoteEndPoint, payload);
                 }
             }
         }

@@ -66,17 +66,20 @@ namespace SIPSorcery.Net
         /// <param name="localPort">The local port the packet was received on.</param>
         /// <param name="remoteEndPoint">The remote end point the packet was received from.</param>
         /// <param name="packet">A buffer containing the packet.</param>
-        private void OnEncapsulationSocketPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, ReadOnlySpan<byte> packet)
+        private void OnEncapsulationSocketPacketReceived(UdpReceiver receiver, int localPort, IPEndPoint remoteEndPoint, Memory<byte> packet)
         {
             try
             {
-                if (!SctpPacket.VerifyChecksum(packet))
+                // Get a Span from the Memory<byte> for synchronous processing.
+                ReadOnlySpan<byte> packetSpan = packet.Span;
+
+                if (!SctpPacket.VerifyChecksum(packetSpan))
                 {
                     logger.LogWarning($"SCTP packet from UDP {remoteEndPoint} dropped due to invalid checksum.");
                 }
                 else
                 {
-                    var sctpPacket = SctpPacketView.Parse(packet);
+                    var sctpPacket = SctpPacketView.Parse(packetSpan);
 
                     // Process packet.
                     if (sctpPacket.Header.VerificationTag == 0)
