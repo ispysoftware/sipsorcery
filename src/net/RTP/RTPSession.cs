@@ -22,6 +22,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Threading;
@@ -2409,6 +2410,8 @@ namespace SIPSorcery.Net
 
         private void OnReceiveRTCPPacket(int localPort, IPEndPoint remoteEndPoint, Memory<byte> buffer)
         {
+            var hdr = new RTPHeader(buffer); // Call the constructor
+
             // Get the SSRC to find the correct security context for SRTCP.
             uint ssrc = BinaryPrimitives.ReadUInt32BigEndian(buffer.Span.Slice(4));
             MediaStream mediaStream = GetMediaStream(ssrc);
@@ -2495,10 +2498,10 @@ namespace SIPSorcery.Net
         {
             if (!IsClosed)
             {
-                // 1. Parse the header directly from the original buffer.
-                // The RTPHeader constructor takes a ReadOnlyMemory<byte>, which is easily
-                // obtained from our Memory<byte> input.
-                var hdr = new RTPHeader(buffer);
+
+                var hdr = new RTPHeader(buffer); // Call the constructor
+
+
                 hdr.ReceivedTime = DateTime.UtcNow; // Set the received time.
 
                 MediaStream mediaStream = GetMediaStream(hdr.SyncSource);

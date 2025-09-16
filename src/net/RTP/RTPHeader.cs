@@ -10,8 +10,8 @@ public class RTPHeader
 {
     public const int MIN_HEADER_LEN = 12;
     public const int RTP_VERSION = 2;
-    public const int ONE_BYTE_EXTENSION_PROFILE = 0xBEDE;
-    public const int TWO_BYTE_EXTENSION_PROFILE = 0x1000;
+    public const ushort ONE_BYTE_EXTENSION_PROFILE = 0xBEDE;
+    public const ushort TWO_BYTE_EXTENSION_PROFILE = 0x1000;
 
     public int Version { get; private set; } = RTP_VERSION;
     public int PaddingFlag { get; set; }
@@ -23,9 +23,9 @@ public class RTPHeader
     public uint Timestamp { get; set; }
     public uint SyncSource { get; set; }
     public uint[] CSRCList { get; private set; }
-    public ushort ExtensionProfile { get; private set; }
-    public ushort ExtensionLength { get; private set; }
-    public ReadOnlyMemory<byte> ExtensionPayload { get; private set; }
+    public ushort ExtensionProfile { get; set; }
+    public ushort ExtensionLength { get; set; }
+    public ReadOnlyMemory<byte> ExtensionPayload { get; set; }
 
     public int PayloadSize { get; private set; }
     public byte PaddingCount { get; private set; }
@@ -54,8 +54,16 @@ public class RTPHeader
         }
         ReceivedTime = DateTime.UtcNow;
         var span = buffer.Span;
+
+        // --- Start of parsing ---
         ushort firstWord = BinaryPrimitives.ReadUInt16BigEndian(span);
 
+        // 1. Parse all fixed header fields first.
+        SequenceNumber = BinaryPrimitives.ReadUInt16BigEndian(span.Slice(2));
+        Timestamp = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(4));
+        SyncSource = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(8));
+
+        // 2. Parse flags from the first word.
         Version = firstWord >> 14;
         PaddingFlag = (firstWord >> 13) & 0x1;
         HeaderExtensionFlag = (firstWord >> 12) & 0x1;
@@ -63,47 +71,51 @@ public class RTPHeader
         MarkerBit = (firstWord >> 7) & 0x1;
         PayloadType = firstWord & 0x7f;
 
-        SequenceNumber = BinaryPrimitives.ReadUInt16BigEndian(span.Slice(2));
-        Timestamp = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(4));
-        SyncSource = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(8));
+        int cursor = MIN_HEADER_LEN;
 
-        int csrcOffset = MIN_HEADER_LEN;
-        if (CSRCCount > 0)
+        // 3. Parse CSRC list if present.
+        if (CSRCCount > 0 && buffer.Length >= cursor + CSRCCount * 4)
         {
             CSRCList = new uint[CSRCCount];
             for (int i = 0; i < CSRCCount; i++)
             {
-                CSRCList[i] = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(csrcOffset));
-                csrcOffset += 4;
+                CSRCList[i] = BinaryPrimitives.ReadUInt32BigEndian(span.Slice(cursor));
+                cursor += 4;
             }
         }
 
-        if (HeaderExtensionFlag == 1 && buffer.Length >= csrcOffset + 4)
+        // 4. Parse header extension if present.
+        if (HeaderExtensionFlag == 1 && buffer.Length >= cursor + 4)
         {
-            ExtensionProfile = BinaryPrimitives.ReadUInt16BigEndian(span.Slice(csrcOffset));
-            ExtensionLength = BinaryPrimitives.ReadUInt16BigEndian(span.Slice(csrcOffset + 2));
+            ExtensionProfile = BinaryPrimitives.ReadUInt16BigEndian(span.Slice(cursor));
+            ExtensionLength = BinaryPrimitives.ReadUInt16BigEndian(span.Slice(cursor + 2));
             int extensionPayloadLength = ExtensionLength * 4;
 
-            if (extensionPayloadLength > 0 && buffer.Length >= csrcOffset + 4 + extensionPayloadLength)
+            cursor += 4; // Move cursor past the extension header.
+
+            if (extensionPayloadLength > 0 && buffer.Length >= cursor + extensionPayloadLength)
             {
-                ExtensionPayload = buffer.Slice(csrcOffset + 4, extensionPayloadLength);
+                ExtensionPayload = buffer.Slice(cursor, extensionPayloadLength);
+                cursor += extensionPayloadLength;
             }
         }
 
-        PayloadSize = buffer.Length - Length;
+        // 5. Correctly calculate payload size AFTER accounting for padding.
+        PaddingCount = 0;
         if (PaddingFlag == 1 && buffer.Length > 0)
         {
             PaddingCount = span[buffer.Length - 1];
-            if (PaddingCount < PayloadSize)
-            {
-                PayloadSize -= PaddingCount;
-            }
+        }
+
+        PayloadSize = buffer.Length - cursor - PaddingCount;
+        if (PayloadSize < 0)
+        {
+            PayloadSize = 0;
         }
     }
 
     public int WriteTo(Span<byte> destination)
     {
-        // ... (WriteTo logic is the same as the previous correct version) ...
         if (destination.Length < Length)
         {
             throw new ArgumentException("Destination buffer is too small for the RTP header.");
