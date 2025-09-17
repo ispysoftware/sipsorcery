@@ -902,6 +902,8 @@ namespace SIPSorcery.Net
             }
         }
 
+
+        private readonly SemaphoreSlim _iceServerLock = new SemaphoreSlim(1, 1);
         /// <summary>
         /// Checks the list of ICE servers to perform STUN binding or TURN reservation requests.
         /// Only one of the ICE server entries should end up being used. If at least one TURN server
@@ -922,7 +924,7 @@ namespace SIPSorcery.Net
             }
 
             // The lock ensures the timer callback doesn't run multiple instances in parallel, even with await.
-            if (Monitor.TryEnter(_iceServerConnections))
+            if (await _iceServerLock.WaitAsync(0).ConfigureAwait(false))
             {
                 try
                 {
@@ -1027,12 +1029,12 @@ namespace SIPSorcery.Net
                 }
                 catch (Exception excp)
                 {
-                    // Catching exceptions is important for "async void" methods.
                     logger.LogError($"Exception in CheckIceServers timer callback. {excp}");
                 }
                 finally
                 {
-                    Monitor.Exit(_iceServerConnections);
+                    // Release the semaphore. This can be called from any thread.
+                    _iceServerLock.Release();
                 }
             }
         }
