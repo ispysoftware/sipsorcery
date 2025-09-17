@@ -134,7 +134,7 @@ namespace SIPSorcery.Net
                 {
                     // Host candidates are always included in the SDP offer or answer.
                     logger.LogDebug("webrtc-rest onicecandidate: {CandidateStr}.", cand.ToShortString());
-                    await SendToSignalingServer(restClient, cand.toJSON(), WebRTCSignalTypesEnum.ice);
+                    await SendToSignalingServer(restClient, cand.toJSON(), WebRTCSignalTypesEnum.ice).ConfigureAwait(false);
                 }
             };
 

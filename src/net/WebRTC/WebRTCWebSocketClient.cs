@@ -90,7 +90,7 @@ namespace SIPSorcery.Net
                 _pc.onicecandidate += async (candidate) =>
                 {
                     logger.LogDebug("WebRTCWebSocketClient sending ICE candidate to server.");
-                    await webSocketClient.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(candidate.toJSON())), WebSocketMessageType.Text, true, cancellation);
+                    await webSocketClient.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(candidate.toJSON())), WebSocketMessageType.Text, true, cancellation).ConfigureAwait(false);
                 };
 
                 _ = Task.Run(() => ReceiveFromWebSocket(_pc, webSocketClient, cancellation)).ConfigureAwait(false);
@@ -120,7 +120,7 @@ namespace SIPSorcery.Net
                 if (posn > 0)
                 {
                     var jsonMsg = Encoding.UTF8.GetString(buffer, 0, posn);
-                    string jsonResp = await OnMessage(jsonMsg, pc);
+                    string jsonResp = await OnMessage(jsonMsg, pc).ConfigureAwait(false);
 
                     if (jsonResp != null)
                     {

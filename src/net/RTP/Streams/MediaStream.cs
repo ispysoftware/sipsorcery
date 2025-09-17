@@ -467,7 +467,7 @@ namespace SIPSorcery.net.RTP
                 ProtectRtpPacket protectRtpPacket = SecureContext?.ProtectRtpPacket;
                 if (protectRtpPacket == null)
                 {
-                    await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, rentedBuffer.AsMemory(0, packetLength));
+                    await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, rentedBuffer.AsMemory(0, packetLength)).ConfigureAwait(false);
                 }
                 else
                 {
@@ -478,7 +478,7 @@ namespace SIPSorcery.net.RTP
                     }
                     else
                     {
-                        await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, rentedBuffer.AsMemory(0, outBufLen));
+                        await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, rentedBuffer.AsMemory(0, outBufLen)).ConfigureAwait(false);
                     }
                 }
 
@@ -497,7 +497,7 @@ namespace SIPSorcery.net.RTP
         {
             // Await the call to the ReadOnlyMemory<byte> overload.
             // The explicit cast ensures the correct method is called, preventing infinite recursion.
-            await SendRtpRawAsync((ReadOnlyMemory<byte>)data, timestamp, markerBit, payloadType, checkDone, seqNum);
+            await SendRtpRawAsync((ReadOnlyMemory<byte>)data, timestamp, markerBit, payloadType, checkDone, seqNum).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -564,7 +564,7 @@ namespace SIPSorcery.net.RTP
         /// <param name="seqNum"> The RTP sequence number </param>
         public async Task SendRtpRawAsync(byte[] data, uint timestamp, int markerBit, int payloadType, ushort seqNum)
         {
-            await SendRtpRawAsync(data, timestamp, markerBit, payloadType, false, seqNum);
+            await SendRtpRawAsync(data, timestamp, markerBit, payloadType, false, seqNum).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -576,7 +576,7 @@ namespace SIPSorcery.net.RTP
         /// <param name="payloadType">The payload ID to set in the RTP header.</param>
         public async Task SendRtpRawAsync(byte[] data, uint timestamp, int markerBit, int payloadType)
         {
-            await SendRtpRawAsync(data, timestamp, markerBit, payloadType, false);
+            await SendRtpRawAsync(data, timestamp, markerBit, payloadType, false).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -585,7 +585,7 @@ namespace SIPSorcery.net.RTP
         /// <param name="rtcpBytes">Raw RTCP report data to send.</param>
         public async Task SendRtcpRawAsync(byte[] rtcpBytes)
         {
-            if (await SendRtcpReportAsync(rtcpBytes))
+            if (await SendRtcpReportAsync(rtcpBytes).ConfigureAwait(false))
             {
                 RTCPCompoundPacket rtcpCompoundPacket = null;
                 try
@@ -625,7 +625,7 @@ namespace SIPSorcery.net.RTP
                 if (protectRtcpPacket == null)
                 {
                     // Await the non-blocking send operation.
-                    await rtpChannel.SendAsync(sendOnSocket, ControlDestinationEndPoint, reportBuffer);
+                    await rtpChannel.SendAsync(sendOnSocket, ControlDestinationEndPoint, reportBuffer).ConfigureAwait(false);
                 }
                 else
                 {
@@ -640,7 +640,7 @@ namespace SIPSorcery.net.RTP
                     else
                     {
                         // Await the non-blocking send operation, using .AsMemory() instead of .AsSpan().
-                        await rtpChannel.SendAsync(sendOnSocket, ControlDestinationEndPoint, sendBuffer.AsMemory(0, outBufLen));
+                        await rtpChannel.SendAsync(sendOnSocket, ControlDestinationEndPoint, sendBuffer.AsMemory(0, outBufLen)).ConfigureAwait(false);
                     }
                 }
             }
@@ -663,7 +663,7 @@ namespace SIPSorcery.net.RTP
             else
             {
                 var reportBytes = report.GetBytes();
-                await SendRtcpReportAsync(reportBytes);
+                await SendRtcpReportAsync(reportBytes).ConfigureAwait(false);
                 OnSendReportByIndex?.Invoke(Index, MediaType, report);
             }
         }
@@ -675,7 +675,7 @@ namespace SIPSorcery.net.RTP
         public async Task SendRtcpFeedback(RTCPFeedback feedback)
         {
             var reportBytes = feedback.GetBytes();
-            await SendRtcpReportAsync(reportBytes);
+            await SendRtcpReportAsync(reportBytes).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -685,7 +685,7 @@ namespace SIPSorcery.net.RTP
         public async Task SendRtcpTWCCFeedbackAsync(RTCPTWCCFeedback feedback)
         {
             var reportBytes = feedback.GetBytes();
-            await SendRtcpReportAsync(reportBytes);
+            await SendRtcpReportAsync(reportBytes).ConfigureAwait(false);
         }
 
         #endregion SEND PACKET

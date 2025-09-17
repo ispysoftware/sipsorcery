@@ -24,6 +24,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.net.RTP;
 using SIPSorcery.Sys;
 
 namespace SIPSorcery.Net
@@ -56,7 +57,7 @@ namespace SIPSorcery.Net
             UdpReceiver udpReceiver = new UdpReceiver(_udpEncapSocket);
             udpReceiver.OnPacketReceived += OnEncapsulationSocketPacketReceived;
             udpReceiver.OnClosed += OnEncapsulationSocketClosed;
-            udpReceiver.BeginReceiveFrom();
+            udpReceiver.Start();
         }
 
         /// <summary>

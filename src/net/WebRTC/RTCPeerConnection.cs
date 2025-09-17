@@ -1444,7 +1444,7 @@ namespace SIPSorcery.Net
             return Task.Run(async () =>
             {
                 //Call Renegotiation Delayed
-                await Task.Delay(RENEGOTIATION_CALL_DELAY, token);
+                await Task.Delay(RENEGOTIATION_CALL_DELAY, token).ConfigureAwait(false);
 
                 //Prevent continue with cancellation requested
                 if (token.IsCancellationRequested)
@@ -1725,7 +1725,7 @@ namespace SIPSorcery.Net
         {
             try
             {
-                await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, destination, buffer);
+                await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, destination, buffer).ConfigureAwait(false);
             }
             catch (Exception excp)
             {
@@ -1760,7 +1760,7 @@ namespace SIPSorcery.Net
                 string error = null;
                 bool result = dtlsHandle.DoHandshake(out error);
                 return (Success: result, Error: error);
-            });
+            }).ConfigureAwait(false);
 
 
             if (!handshakeResult)

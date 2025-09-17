@@ -87,7 +87,7 @@ namespace SIPSorcery.Net
                 NegotiatedFormat = GetSendingFormat();
                 sendingFormatFound = true;
             }
-            await SendAudioFrameAsync(durationRtpUnits, NegotiatedFormat.ID, sample);
+            await SendAudioFrameAsync(durationRtpUnits, NegotiatedFormat.ID, sample).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -98,7 +98,7 @@ namespace SIPSorcery.Net
         /// <param name="sample">The audio sample to set as the RTP packet payload.</param>
         public async Task SendAudio(uint durationRtpUnits, byte[] sample)
         {
-            await SendAudioAsync(durationRtpUnits, new ArraySegment<byte>(sample));
+            await SendAudioAsync(durationRtpUnits, new ArraySegment<byte>(sample)).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -142,7 +142,7 @@ namespace SIPSorcery.Net
                         ReadOnlyMemory<byte> packetPayload = buffer.Slice(offset, payloadLength);
 
                         // Assuming SendRtpRaw is also updated to take a ReadOnlySpan<byte>
-                        await SendRtpRawAsync(packetPayload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                        await SendRtpRawAsync(packetPayload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
 
                         LocalTrack.Timestamp += packetDuration;
                         totalIncrement += packetDuration;
@@ -169,7 +169,7 @@ namespace SIPSorcery.Net
         /// <param name="buffer">The audio payload to send.</param>
         public async Task SendAudioFrameAsync(uint duration, int payloadTypeID, byte[] buffer)
         {
-            await SendAudioFrameAsync(duration, payloadTypeID, new ArraySegment<byte>(buffer));
+            await SendAudioFrameAsync(duration, payloadTypeID, new ArraySegment<byte>(buffer)).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -212,7 +212,7 @@ namespace SIPSorcery.Net
 
                         int markerBit = (i == 0) ? 1 : 0;  // Set marker bit for the first packet in the event.
 
-                        await SendRtpRawAsync(buffer, LocalTrack.Timestamp, markerBit, rtpEvent.PayloadTypeID, true);
+                        await SendRtpRawAsync(buffer, LocalTrack.Timestamp, markerBit, rtpEvent.PayloadTypeID, true).ConfigureAwait(false);
                     }
 
                     await Task.Delay(samplePeriod, cancellationToken).ConfigureAwait(false);
@@ -225,7 +225,7 @@ namespace SIPSorcery.Net
                             rtpEvent.Duration += rtpTimestampStep;
                             byte[] buffer = rtpEvent.GetEventPayload();
 
-                            await SendRtpRawAsync(buffer, LocalTrack.Timestamp, 0, rtpEvent.PayloadTypeID, true);
+                            await SendRtpRawAsync(buffer, LocalTrack.Timestamp, 0, rtpEvent.PayloadTypeID, true).ConfigureAwait(false);
 
                             await Task.Delay(samplePeriod, cancellationToken).ConfigureAwait(false);
                         }
@@ -237,7 +237,7 @@ namespace SIPSorcery.Net
                             rtpEvent.Duration = rtpEvent.TotalDuration;
                             byte[] buffer = rtpEvent.GetEventPayload();
 
-                            await SendRtpRawAsync(buffer, LocalTrack.Timestamp, 0, rtpEvent.PayloadTypeID, true);
+                            await SendRtpRawAsync(buffer, LocalTrack.Timestamp, 0, rtpEvent.PayloadTypeID, true).ConfigureAwait(false);
                         }
                     }
                     LocalTrack.Timestamp += rtpEvent.TotalDuration;

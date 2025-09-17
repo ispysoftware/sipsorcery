@@ -111,7 +111,7 @@ namespace SIPSorcery.SIP
                     var authTask = sslStream.AuthenticateAsServerAsync(m_serverCertificate);
                     var timeoutTask = Task.Delay(TLS_ATTEMPT_CONNECT_TIMEOUT, cts.Token);
 
-                    var resultTask = await Task.WhenAny(authTask, timeoutTask);
+                    var resultTask = await Task.WhenAny(authTask, timeoutTask).ConfigureAwait(false);
                     if (resultTask == timeoutTask)
                     {
                         logger.LogWarning("SIP TLS Channel failed to connect to remote host. The authentication handshake timed out.");

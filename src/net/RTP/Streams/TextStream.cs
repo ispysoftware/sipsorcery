@@ -46,10 +46,10 @@ namespace SIPSorcery.net.RTP
                 NegotiatedFormat = GetSendingFormat();
                 sendingFormatFound = true;
             }
-            await SendTextFrame(NegotiatedFormat.ID, sample);
+            await SendTextFrameAsync(NegotiatedFormat.ID, sample).ConfigureAwait(false);
         }
 
-        private async Task SendTextFrame(int payloadTypeID, byte[] buffer)
+        private async Task SendTextFrameAsync(int payloadTypeID, byte[] buffer)
         {
             if (CheckIfCanSendRtpRaw())
             {
@@ -87,7 +87,7 @@ namespace SIPSorcery.net.RTP
                         Buffer.BlockCopy(buffer, offset, payload, 0, payloadLength);
 
                         // Send the RTP packet with the updated timestamp
-                        await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                        await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
                     }
 
                     // Update the last send time

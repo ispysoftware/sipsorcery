@@ -105,7 +105,7 @@ namespace SIPSorcery.Net
 
                         int markerBit = ((index + 1) * RTPSession.RTP_MAX_PAYLOAD < jpegBytes.Length) ? 0 : 1;
 
-                        await SendRtpRawAsync(packetPayload.ToArray(), LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                        await SendRtpRawAsync(packetPayload.ToArray(), LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
                     }
 
                     LocalTrack.Timestamp += duration;
@@ -153,7 +153,7 @@ namespace SIPSorcery.Net
                 int markerBit = isLastNal ? 1 : 0;
 
                 SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
-                await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
             }
             // The NAL must be fragmented across multiple RTP packets.
             else
@@ -184,7 +184,7 @@ namespace SIPSorcery.Net
                     SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
 
                     // This was the last blocking call - now corrected.
-                    await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                    await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
                 }
             }
 
@@ -211,7 +211,7 @@ namespace SIPSorcery.Net
                 foreach (var nal in nals)
                 {
                     //logger.LogTrace("(out) SEND {bits}({of}/{all})", nal.NAL.Length, i++, nals.Count());
-                    await SendH26XNalAsync(durationRtpUnits, payloadID, nal.NAL, nal.IsLast, true);
+                    await SendH26XNalAsync(durationRtpUnits, payloadID, nal.NAL, nal.IsLast, true).ConfigureAwait(false);
                 }
             }
         }
@@ -257,7 +257,7 @@ namespace SIPSorcery.Net
 
                     SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
                     // Await the non-blocking send operation.
-                    await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                    await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
                 }
 
                 LocalTrack.Timestamp += duration;
@@ -286,7 +286,7 @@ namespace SIPSorcery.Net
                     if (rtpHeader.Length + frameData.Data.Length <= RTPSession.RTP_MAX_PAYLOAD)
                     {
                         var payload = rtpHeader.Concat(frameData.Data).ToArray();
-                        await SendRtpRawAsync(payload, LocalTrack.Timestamp, 1, payloadID, true);
+                        await SendRtpRawAsync(payload, LocalTrack.Timestamp, 1, payloadID, true).ConfigureAwait(false);
                     }
                     else
                     {
@@ -299,7 +299,7 @@ namespace SIPSorcery.Net
                             var data = isLast ? restBytes : restBytes.Take(dataSize).ToArray();
                             var markerBit = isLast ? 0 : 1;
                             var payload = rtpHeader.Concat(data).ToArray();
-                            await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadID, true);
+                            await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadID, true).ConfigureAwait(false);
 
                             offset += RTPSession.RTP_MAX_PAYLOAD;
                             rtpHeader = MJPEGPacketiser.GetMJPEGRTPHeader(customData, offset);
@@ -333,10 +333,10 @@ namespace SIPSorcery.Net
             switch (sendingFormat.Codec)
             {
                 case VideoCodecsEnum.VP8:
-                    await SendVp8FrameAsync(durationRtpUnits, payloadID, sample);
+                    await SendVp8FrameAsync(durationRtpUnits, payloadID, sample).ConfigureAwait(false);
                     break;
                 case VideoCodecsEnum.H264:
-                    await SendH264FrameAsync(durationRtpUnits, payloadID, sample);
+                    await SendH264FrameAsync(durationRtpUnits, payloadID, sample).ConfigureAwait(false);
                     break;
                 //case VideoCodecsEnum.H265:
                 //    SendH265Frame(durationRtpUnits, payloadID, sample);

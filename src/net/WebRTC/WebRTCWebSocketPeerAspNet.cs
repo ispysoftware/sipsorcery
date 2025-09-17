@@ -83,7 +83,7 @@ public class WebRTCWebSocketPeerAspNet
 
         if (cancellationToken != default)
         {
-            cancellationToken.Register(async () => await Close());
+            cancellationToken.Register(async () => await Close().ConfigureAwait(false));
         }
     }
 
@@ -100,7 +100,7 @@ public class WebRTCWebSocketPeerAspNet
             if (_pc.signalingState == RTCSignalingState.have_remote_offer ||
                 _pc.signalingState == RTCSignalingState.stable)
             {
-                await SendMessageAsync(iceCandidate.toJSON());
+                await SendMessageAsync(iceCandidate.toJSON()).ConfigureAwait(false);
             }
         };
 
@@ -118,7 +118,7 @@ public class WebRTCWebSocketPeerAspNet
 
         if (_peerRole == RTCSdpType.offer)
         {
-            await SendOffer();
+            await SendOffer().ConfigureAwait(false);
         }
 
         if (_keepalive)
@@ -127,15 +127,15 @@ public class WebRTCWebSocketPeerAspNet
             {
                 while (!_cts.Token.IsCancellationRequested && _webSocket.State == WebSocketState.Open)
                 {
-                    await Task.Delay(KeepAliveTime);
+                    await Task.Delay(KeepAliveTime).ConfigureAwait(false);
                     _logger.LogTrace("Sending signaling channel keep alive 'ping'.");
-                    await SendMessageAsync("ping");
+                    await SendMessageAsync("ping").ConfigureAwait(false);
                 }
             });
         }
 
         // Start the web socket receiving loop.
-        await StartReceivingAsync(_cts.Token);
+        await StartReceivingAsync(_cts.Token).ConfigureAwait(false);
     }
 
     private async Task SendOffer()
@@ -143,13 +143,13 @@ public class WebRTCWebSocketPeerAspNet
         _logger.LogDebug("Generating SDP offer to send to web socket client.");
 
         var offerSdp = _pc.createOffer(OfferOptions);
-        await _pc.setLocalDescription(offerSdp);
+        await _pc.setLocalDescription(offerSdp).ConfigureAwait(false);
 
         _logger.LogDebug("Sending SDP offer to web socket client.");
 
         try
         {
-            await SendMessageAsync(offerSdp.toJSON());
+            await SendMessageAsync(offerSdp.toJSON()).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -167,17 +167,17 @@ public class WebRTCWebSocketPeerAspNet
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                var receiveResult = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                var receiveResult = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken).ConfigureAwait(false);
                 if (receiveResult.MessageType == WebSocketMessageType.Close)
                 {
                     _logger.LogDebug("{name} close message received from remote web socket client.", nameof(WebRTCWebSocketPeerAspNet));
 
-                    await Close();
+                    await Close().ConfigureAwait(false);
                     break;
                 }
                 else
                 {
-                    await OnMessage(receiveResult, buffer);
+                    await OnMessage(receiveResult, buffer).ConfigureAwait(false);
                 }
             }
         }
@@ -234,7 +234,7 @@ public class WebRTCWebSocketPeerAspNet
                     await _pc.setLocalDescription(answerSdp).ConfigureAwait(false);
 
                     _logger.LogDebug("Sending SDP answer to client.");
-                    await SendMessageAsync(answerSdp.toJSON());
+                    await SendMessageAsync(answerSdp.toJSON()).ConfigureAwait(false);
                 }
             }
         }
@@ -256,7 +256,7 @@ public class WebRTCWebSocketPeerAspNet
 
         if (_webSocket.State == WebSocketState.Open)
         {
-            await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed by the server", CancellationToken.None);
+            await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed by the server", CancellationToken.None).ConfigureAwait(false);
         }
     }
 
@@ -270,6 +270,6 @@ public class WebRTCWebSocketPeerAspNet
         var messageBytes = Encoding.UTF8.GetBytes(message);
         var messageSegment = new ArraySegment<byte>(messageBytes);
 
-        await _webSocket.SendAsync(messageSegment, WebSocketMessageType.Text, true, CancellationToken.None);
+        await _webSocket.SendAsync(messageSegment, WebSocketMessageType.Text, true, CancellationToken.None).ConfigureAwait(false);
     }
 }

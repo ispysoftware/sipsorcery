@@ -76,6 +76,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.net.ICE;
+using SIPSorcery.net.RTP;
 using SIPSorcery.Sys;
 
 [assembly: InternalsVisibleToAttribute("SIPSorcery.UnitTests")]
@@ -123,275 +125,6 @@ namespace SIPSorcery.Net
         private const int CONNECTED_CHECK_PERIOD = 3;       // The period in seconds to send STUN connectivity checks once connected. 
         public const string SDP_MID = "0";
         public const int SDP_MLINE_INDEX = 0;
-
-        public class IceTcpReceiver : UdpReceiver
-        {
-            protected const int REVEIVE_TCP_BUFFER_SIZE = RECEIVE_BUFFER_SIZE * 2;
-
-            protected int m_recvOffset;
-            public IceTcpReceiver(Socket socket, int mtu = REVEIVE_TCP_BUFFER_SIZE) : base(socket, mtu)
-            {
-                m_recvOffset = 0;
-            }
-
-            /// <summary>
-            /// Starts the receive. This method returns immediately. An event will be fired in the corresponding "End" event to
-            /// return any data received.
-            /// </summary>
-            public override void BeginReceiveFrom()
-            {
-                //Prevent call BeginReceiveFrom if it is already running or into invalid state
-                if ((m_isClosed || !m_socket.Connected) && m_isRunningReceive)
-                {
-                    m_isRunningReceive = false;
-                }
-                if (m_isRunningReceive || m_isClosed || !m_socket.Connected)
-                {
-                    return;
-                }
-
-                try
-                {
-                    m_isRunningReceive = true;
-                    EndPoint recvEndPoint = m_addressFamily == AddressFamily.InterNetwork ? new IPEndPoint(IPAddress.Any, 0) : new IPEndPoint(IPAddress.IPv6Any, 0);
-                    var recvLength = m_recvBuffer.Length - m_recvOffset;
-                    //Discard fragmentation buffer as seems that we will have an incorrect result based in cached values
-                    if (recvLength <= 0 || m_recvOffset < 0)
-                    {
-                        m_recvOffset = 0;
-                        recvLength = m_recvBuffer.Length;
-                    }
-                    m_socket.BeginReceiveFrom(m_recvBuffer, m_recvOffset, recvLength, SocketFlags.None, ref recvEndPoint, EndReceiveFrom, null);
-                }
-                // Thrown when socket is closed. Can be safely ignored.
-                // This exception can be thrown in response to an ICMP packet. The problem is the ICMP packet can be a false positive.
-                // For example if the remote RTP socket has not yet been opened the remote host could generate an ICMP packet for the 
-                // initial RTP packets. Experience has shown that it's not safe to close an RTP connection based solely on ICMP packets.
-                catch (ObjectDisposedException)
-                {
-                    m_isRunningReceive = false;
-                }
-                catch (SocketException sockExcp)
-                {
-                    m_isRunningReceive = false;
-                    logger.LogWarning($"Socket error {sockExcp.SocketErrorCode} in IceTcpReceiver.BeginReceiveFrom. {sockExcp.Message}");
-                    //Close(sockExcp.Message);
-                }
-                catch (Exception excp)
-                {
-                    m_isRunningReceive = false;
-                    // From https://github.com/dotnet/corefx/blob/e99ec129cfd594d53f4390bf97d1d736cff6f860/src/System.Net.Sockets/src/System/Net/Sockets/Socket.cs#L3262
-                    // the BeginReceiveFrom will only throw if there is an problem with the arguments or the socket has been disposed of. In that
-                    // case the socket can be considered to be unusable and there's no point trying another receive.
-                    logger.LogError(excp, $"Exception IceTcpReceiver.BeginReceiveFrom. {excp.Message}");
-                    Close(excp.Message);
-                }
-            }
-
-            /// <summary>
-            /// Handler for end of the begin receive call.
-            /// </summary>
-            /// <param name="ar">Contains the results of the receive.</param>
-            protected override void EndReceiveFrom(IAsyncResult ar)
-            {
-                try
-                {
-                    // When socket is closed the object will be disposed of in the middle of a receive.
-                    if (!m_isClosed)
-                    {
-                        EndPoint remoteEP = m_addressFamily == AddressFamily.InterNetwork ? new IPEndPoint(IPAddress.Any, 0) : new IPEndPoint(IPAddress.IPv6Any, 0);
-                        int bytesRead = m_socket.EndReceiveFrom(ar, ref remoteEP);
-
-                        if (bytesRead > 0)
-                        {
-                            ProcessRawBuffer(bytesRead + m_recvOffset, remoteEP as IPEndPoint);
-                        }
-                    }
-
-                    // If there is still data available it should be read now. This is more efficient than calling
-                    // BeginReceiveFrom which will incur the overhead of creating the callback and then immediately firing it.
-                    // It also avoids the situation where if the application cannot keep up with the network then BeginReceiveFrom
-                    // will be called synchronously (if data is available it calls the callback method immediately) which can
-                    // create a very nasty stack.
-                    if (!m_isClosed && m_socket.Available > 0)
-                    {
-                        while (!m_isClosed && m_socket.Available > 0)
-                        {
-                            EndPoint remoteEP = m_addressFamily == AddressFamily.InterNetwork ? new IPEndPoint(IPAddress.Any, 0) : new IPEndPoint(IPAddress.IPv6Any, 0);
-                            var recvLength = m_recvBuffer.Length - m_recvOffset;
-                            //Discard fragmentation buffer as seems that we will have an incorrect result based in cached values
-                            if (recvLength <= 0 || m_recvOffset < 0)
-                            {
-                                m_recvOffset = 0;
-                                recvLength = m_recvBuffer.Length;
-                            }
-                            int bytesReadSync = m_socket.ReceiveFrom(m_recvBuffer, m_recvOffset, recvLength, SocketFlags.None, ref remoteEP);
-
-                            if (bytesReadSync > 0)
-                            {
-                                if (ProcessRawBuffer(bytesReadSync + m_recvOffset, remoteEP as IPEndPoint) == 0)
-                                {
-                                    break;
-                                }
-                            }
-                            else
-                            {
-                                break;
-                            }
-                        }
-                    }
-                }
-                catch (SocketException resetSockExcp) when (resetSockExcp.SocketErrorCode == SocketError.ConnectionReset)
-                {
-                    // Thrown when close is called on a socket from this end. Safe to ignore.
-                }
-                catch (SocketException sockExcp)
-                {
-                    // Socket errors do not trigger a close. The reason being that there are genuine situations that can cause them during
-                    // normal RTP operation. For example:
-                    // - the RTP connection may start sending before the remote socket starts listening,
-                    // - an on hold, transfer, etc. operation can change the RTP end point which could result in socket errors from the old
-                    //   or new socket during the transition.
-                    // It also seems that once a UDP socket pair have exchanged packets and the remote party closes the socket exception will occur
-                    // in the BeginReceive method (very handy). Follow-up, this doesn't seem to be the case, the socket exception can occur in 
-                    // BeginReceive before any packets have been exchanged. This means it's not safe to close if BeginReceive gets an ICMP 
-                    // error since the remote party may not have initialised their socket yet.
-                    logger.LogWarning(sockExcp, $"SocketException IceTcpReceiver.EndReceiveFrom ({sockExcp.SocketErrorCode}). {sockExcp.Message}");
-                }
-                catch (ObjectDisposedException) // Thrown when socket is closed. Can be safely ignored.
-                { }
-                catch (Exception excp)
-                {
-                    logger.LogError($"Exception IceTcpReceiver.EndReceiveFrom. {excp}");
-                    Close(excp.Message);
-                }
-                finally
-                {
-                    m_isRunningReceive = false;
-                    if (!m_isClosed)
-                    {
-                        BeginReceiveFrom();
-                    }
-                }
-            }
-
-            // TODO: If we miss any package because slow internet connection
-            // and initial byte in buffer is not a STUNHeader (starts with 0x00 0x00)
-            // and our receive buffer is full, we need a way to discard whole buffer
-            // or check for 0x00 0x00 start again.
-            protected virtual int ProcessRawBuffer(int bytesRead, IPEndPoint remoteEP)
-            {
-                var extractCount = 0;
-                if (bytesRead > 0)
-                {
-                    // During experiments IPPacketInformation wasn't getting set on Linux. Without it the local IP address
-                    // cannot be determined when a listener was bound to IPAddress.Any (or IPv6 equivalent). If the caller
-                    // is relying on getting the local IP address on Linux then something may fail.
-                    //if (packetInfo != null && packetInfo.Address != null)
-                    //{
-                    //    localEndPoint = new IPEndPoint(packetInfo.Address, localEndPoint.Port);
-                    //}
-
-                    //Try extract all StunMessages from current receive buffer
-                    var isFragmented = true;
-                    var recvRemainingSegment = new ArraySegment<byte>(m_recvBuffer, 0, bytesRead);
-
-                    while (recvRemainingSegment.Count > STUNHeader.STUN_HEADER_LENGTH)
-                    {
-                        isFragmented = false;
-                        STUNHeader header = null;
-                        try
-                        {
-                            header = STUNHeader.ParseSTUNHeader(recvRemainingSegment);
-                        }
-                        catch
-                        {
-                            header = null;
-                        }
-                        if (header != null)
-                        {
-                            int stunMsgBytes = STUNHeader.STUN_HEADER_LENGTH + header.MessageLength;
-                            if (stunMsgBytes % 4 != 0)
-                            {
-                                stunMsgBytes = stunMsgBytes - (stunMsgBytes % 4) + 4;
-                            }
-
-                            //We have the packet count all inside current receiving buffer
-                            if (recvRemainingSegment.Count >= stunMsgBytes)
-                            {
-                                extractCount++;
-                                m_recvOffset = recvRemainingSegment.Offset + recvRemainingSegment.Count;
-
-                                byte[] packetBuffer = new byte[stunMsgBytes];
-                                Buffer.BlockCopy(recvRemainingSegment.Array, recvRemainingSegment.Offset, packetBuffer, 0, stunMsgBytes);
-
-                                CallOnPacketReceivedCallback(m_localEndPoint.Port, remoteEP, packetBuffer);
-
-                                var newOffset = recvRemainingSegment.Offset + stunMsgBytes;
-                                var newCount = recvRemainingSegment.Count - stunMsgBytes;
-                                if (newCount > STUNHeader.STUN_HEADER_LENGTH && newOffset >= 0)
-                                {
-                                    recvRemainingSegment = new ArraySegment<byte>(recvRemainingSegment.Array, newOffset, newCount);
-                                }
-                                else
-                                {
-                                    if (newCount > 0 && newOffset >= 0)
-                                    {
-                                        recvRemainingSegment = new ArraySegment<byte>(recvRemainingSegment.Array, newOffset, newCount);
-                                        isFragmented = true;
-                                    }
-                                    else
-                                    {
-                                        recvRemainingSegment = new ArraySegment<byte>();
-                                        isFragmented = false;
-                                    }
-                                    break;
-                                }
-                            }
-                            //We have a fragmentation but the header is intact, we need to cache the fragmentation for the next receive cycle
-                            else
-                            {
-                                isFragmented = true;
-                                break;
-                            }
-                        }
-                        //Save Remaining Buffer in start of m_recvBuffer
-                        else
-                        {
-                            isFragmented = true;
-                            break;
-                        }
-                    }
-
-                    if (isFragmented)
-                    {
-                        m_recvOffset = recvRemainingSegment.Count;
-                        Buffer.BlockCopy(recvRemainingSegment.Array, recvRemainingSegment.Offset, m_recvBuffer, 0, recvRemainingSegment.Count);
-                    }
-                    else
-                    {
-                        m_recvOffset = 0;
-                    }
-                }
-
-                return extractCount;
-            }
-
-            /// <summary>
-            /// Closes the socket and stops any new receives from being initiated.
-            /// </summary>
-            public override void Close(string reason)
-            {
-                if (!m_isClosed)
-                {
-                    if (m_socket != null && m_socket.Connected)
-                    {
-                        m_socket?.Disconnect(false);
-                    }
-                    base.Close(reason);
-                }
-            }
-        }
 
         /// <summary>
         /// ICE transaction spacing interval in milliseconds.
@@ -791,7 +524,7 @@ namespace SIPSorcery.Net
                         };
                         rtpTcpReceiver.OnPacketReceived += OnRTPPacketReceived;
                         rtpTcpReceiver.OnClosed += onClose;
-                        rtpTcpReceiver.BeginReceiveFrom();
+                        rtpTcpReceiver.Start();
 
                         m_rtpTcpReceiverByUri.Add(stunUri, rtpTcpReceiver);
                     }
@@ -1143,7 +876,7 @@ namespace SIPSorcery.Net
                     logger.LogDebug($"Sending TURN refresh request to ICE server {_activeIceServer._uri}.");
 
                     // Await the non-blocking refresh request.
-                    _activeIceServer.Error = await SendTurnRefreshRequestAsync(_activeIceServer);
+                    _activeIceServer.Error = await SendTurnRefreshRequestAsync(_activeIceServer).ConfigureAwait(false);
                 }
 
                 if (NominatedEntry.TurnPermissionsRequestSent >= IceServer.MAX_REQUESTS)
@@ -1160,7 +893,7 @@ namespace SIPSorcery.Net
                                     $"(TxID: {NominatedEntry.RequestTransactionID}).");
 
                     // Await the non-blocking permissions request.
-                    await SendTurnCreatePermissionsRequestAsync(NominatedEntry.RequestTransactionID, NominatedEntry.LocalCandidate.IceServer, NominatedEntry.RemoteCandidate.DestinationEndPoint);
+                    await SendTurnCreatePermissionsRequestAsync(NominatedEntry.RequestTransactionID, NominatedEntry.LocalCandidate.IceServer, NominatedEntry.RemoteCandidate.DestinationEndPoint).ConfigureAwait(false);
                 }
             }
             catch (Exception excp)
@@ -1278,14 +1011,14 @@ namespace SIPSorcery.Net
                         logger.LogDebug($"Sending STUN binding request to ICE server {_activeIceServer._uri} with address {_activeIceServer.ServerEndPoint}.");
 
                         // Await the asynchronous send method.
-                        _activeIceServer.Error = await SendStunBindingRequestAsync(_activeIceServer);
+                        _activeIceServer.Error = await SendStunBindingRequestAsync(_activeIceServer).ConfigureAwait(false);
                     }
                     else if (_activeIceServer.ServerReflexiveEndPoint == null && _activeIceServer._uri.Scheme == STUNSchemesEnum.turn)
                     {
                         logger.LogDebug($"Sending TURN allocate request to ICE server {_activeIceServer._uri} with address {_activeIceServer.ServerEndPoint}.");
 
                         // Await the asynchronous send method.
-                        _activeIceServer.Error = await SendTurnAllocateRequestAsync(_activeIceServer);
+                        _activeIceServer.Error = await SendTurnAllocateRequestAsync(_activeIceServer).ConfigureAwait(false);
                     }
                     else
                     {
@@ -1794,7 +1527,7 @@ namespace SIPSorcery.Net
                         logger.LogDebug($"ICE RTP channel sending TURN permissions request {candidatePair.TurnPermissionsRequestSent} to server {candidatePair.LocalCandidate.IceServer._uri} for peer {candidatePair.RemoteCandidate.DestinationEndPoint} (TxID: {candidatePair.RequestTransactionID}).");
 
                         // Await the task-based async method.
-                        await SendTurnCreatePermissionsRequestAsync(candidatePair.RequestTransactionID, candidatePair.LocalCandidate.IceServer, candidatePair.RemoteCandidate.DestinationEndPoint);
+                        await SendTurnCreatePermissionsRequestAsync(candidatePair.RequestTransactionID, candidatePair.LocalCandidate.IceServer, candidatePair.RemoteCandidate.DestinationEndPoint).ConfigureAwait(false);
                     }
                 }
                 else
@@ -1858,14 +1591,14 @@ namespace SIPSorcery.Net
                     var protocol = candidatePair.LocalCandidate.IceServer.Protocol;
 
                     // Await the non-blocking relay send operation.
-                    await SendRelayAsync(protocol, candidatePair.RemoteCandidate.DestinationEndPoint, stunReqBytes, relayServerEP, candidatePair.LocalCandidate.IceServer, OnBindingFailure);
+                    await SendRelayAsync(protocol, candidatePair.RemoteCandidate.DestinationEndPoint, stunReqBytes, relayServerEP, candidatePair.LocalCandidate.IceServer, OnBindingFailure).ConfigureAwait(false);
                 }
                 else
                 {
                     IPEndPoint remoteEndPoint = candidatePair.RemoteCandidate.DestinationEndPoint;
 
                     // Await the non-blocking send operation.
-                    var sendResult = await base.SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunReqBytes, OnBindingFailure);
+                    var sendResult = await base.SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunReqBytes, OnBindingFailure).ConfigureAwait(false);
 
                     if (sendResult != SocketError.Success)
                     {
@@ -2151,7 +1884,7 @@ namespace SIPSorcery.Net
 
                     STUNMessage stunErrResponse = new STUNMessage(STUNMessageTypesEnum.BindingErrorResponse);
                     stunErrResponse.Header.TransactionId = bindingRequest.Header.TransactionId;
-                    await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false));
+                    await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false)).ConfigureAwait(false);
 
                     OnStunMessageSent?.Invoke(stunErrResponse, remoteEndPoint, false);
                 }
@@ -2165,7 +1898,7 @@ namespace SIPSorcery.Net
                         logger.LogWarning($"ICE RTP channel STUN binding request from {remoteEndPoint} failed an integrity check, rejecting.");
                         STUNMessage stunErrResponse = new STUNMessage(STUNMessageTypesEnum.BindingErrorResponse);
                         stunErrResponse.Header.TransactionId = bindingRequest.Header.TransactionId;
-                        await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false));
+                        await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false)).ConfigureAwait(false);
 
                         OnStunMessageSent?.Invoke(stunErrResponse, remoteEndPoint, false);
                     }
@@ -2217,7 +1950,7 @@ namespace SIPSorcery.Net
                             logger.LogWarning("ICE RTP channel STUN request matched a remote candidate but NOT a checklist entry.");
                             STUNMessage stunErrResponse = new STUNMessage(STUNMessageTypesEnum.BindingErrorResponse);
                             stunErrResponse.Header.TransactionId = bindingRequest.Header.TransactionId;
-                            await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false));
+                            await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false)).ConfigureAwait(false);
 
                             OnStunMessageSent?.Invoke(stunErrResponse, remoteEndPoint, false);
                         }
@@ -2247,12 +1980,12 @@ namespace SIPSorcery.Net
                             if (wasRelayed)
                             {
                                 var protocol = matchingChecklistEntry.LocalCandidate.IceServer.Protocol;
-                                await SendRelayAsync(protocol, remoteEndPoint, stunRespBytes, matchingChecklistEntry.LocalCandidate.IceServer.ServerEndPoint, matchingChecklistEntry.LocalCandidate.IceServer, onFailure: null);
+                                await SendRelayAsync(protocol, remoteEndPoint, stunRespBytes, matchingChecklistEntry.LocalCandidate.IceServer.ServerEndPoint, matchingChecklistEntry.LocalCandidate.IceServer, onFailure: null).ConfigureAwait(false);
                                 OnStunMessageSent?.Invoke(stunResponse, remoteEndPoint, true);
                             }
                             else
                             {
-                                await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunRespBytes);
+                                await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunRespBytes).ConfigureAwait(false);
                                 OnStunMessageSent?.Invoke(stunResponse, remoteEndPoint, false);
                             }
                         }
@@ -2341,9 +2074,11 @@ namespace SIPSorcery.Net
             }
 
             // Await the result of the appropriate async send method.
-            var sendResult = await (iceServer.Protocol == ProtocolType.Tcp ?
-                SendOverTCPAsync(iceServer, stunReqBytes) :
-                base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, stunReqBytes, OnBindingFailure));
+            SocketError sendResult;
+            if (iceServer.Protocol == ProtocolType.Tcp)
+                sendResult = await SendOverTCPAsync(iceServer, stunReqBytes).ConfigureAwait(false);
+            else
+                sendResult = await base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, stunReqBytes, OnBindingFailure).ConfigureAwait(false);
 
             if (sendResult != SocketError.Success)
             {
@@ -2389,9 +2124,11 @@ namespace SIPSorcery.Net
             }
 
             // Await the result of the appropriate async send method.
-            var sendResult = await (iceServer.Protocol == ProtocolType.Tcp ?
-                SendOverTCPAsync(iceServer, allocateReqBytes) :
-                base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, allocateReqBytes, OnBindingFailure));
+            SocketError sendResult;
+            if (iceServer.Protocol == ProtocolType.Tcp)
+                sendResult = await SendOverTCPAsync(iceServer, allocateReqBytes).ConfigureAwait(false);
+            else
+                sendResult = await base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, allocateReqBytes, OnBindingFailure).ConfigureAwait(false);
 
             if (sendResult != SocketError.Success)
             {
@@ -2437,9 +2174,11 @@ namespace SIPSorcery.Net
             }
 
             // Await the result of the appropriate async send method.
-            var sendResult = await (iceServer.Protocol == ProtocolType.Tcp ?
-                SendOverTCPAsync(iceServer, allocateReqBytes) :
-                base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, allocateReqBytes));
+            SocketError sendResult;
+            if (iceServer.Protocol == ProtocolType.Tcp)
+                sendResult = await SendOverTCPAsync(iceServer, allocateReqBytes).ConfigureAwait(false);
+            else
+                sendResult = await base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, allocateReqBytes, OnBindingFailure).ConfigureAwait(false);
 
             if (sendResult != SocketError.Success)
             {
@@ -2482,10 +2221,13 @@ namespace SIPSorcery.Net
                 createPermissionReqBytes = permissionsRequest.ToByteBuffer(null, false);
             }
 
-            // Await the result of the appropriate async send method using a conditional expression.
-            var sendResult = await (iceServer.Protocol == ProtocolType.Tcp ?
-                SendOverTCPAsync(iceServer, createPermissionReqBytes) :
-                base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, createPermissionReqBytes));
+            SocketError sendResult;
+            if (iceServer.Protocol == ProtocolType.Tcp)
+                sendResult = await SendOverTCPAsync(iceServer, createPermissionReqBytes).ConfigureAwait(false);
+            else
+                sendResult = await base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, createPermissionReqBytes, OnBindingFailure).ConfigureAwait(false);
+
+
 
             if (sendResult != SocketError.Success)
             {
@@ -2547,19 +2289,19 @@ namespace SIPSorcery.Net
                     }
 
                     // Use the non-blocking async version of Connect.
-                    await sendSocket.ConnectAsync(dstEndPoint);
+                    await sendSocket.ConnectAsync(dstEndPoint).ConfigureAwait(false);
                     logger.LogDebug($"SendOverTCPAsync status: {sendSocket.Connected} endpoint: {dstEndPoint}");
                 }
 
                 m_rtpTcpReceiverByUri.TryGetValue(iceServer?._uri, out IceTcpReceiver rtpTcpReceiver);
                 if (rtpTcpReceiver != null && !rtpTcpReceiver.IsRunningReceive && !rtpTcpReceiver.IsClosed)
                 {
-                    rtpTcpReceiver.BeginReceiveFrom();
+                    rtpTcpReceiver.Start();
                 }
 
                 // --- Non-blocking send logic ---
                 // Replace BeginSendTo/callback with a single awaitable call.
-                await sendSocket.SendAsync(buffer, SocketFlags.None);
+                await sendSocket.SendAsync(buffer, SocketFlags.None).ConfigureAwait(false);
 
                 return SocketError.Success;
             }
@@ -2722,8 +2464,8 @@ namespace SIPSorcery.Net
 
             // Await the result of the appropriate async send method.
             var sendResult = protocol == ProtocolType.Tcp ?
-                await SendOverTCPAsync(iceServer, request) :
-                await base.SendAsync(RTPChannelSocketsEnum.RTP, relayEndPoint, request, onFailure);
+                await SendOverTCPAsync(iceServer, request).ConfigureAwait(false) :
+                await base.SendAsync(RTPChannelSocketsEnum.RTP, relayEndPoint, request, onFailure).ConfigureAwait(false);
 
             if (sendResult != SocketError.Success)
             {
@@ -2807,12 +2549,12 @@ namespace SIPSorcery.Net
                 var serverEndPoint = NominatedEntry.LocalCandidate.IceServer.ServerEndPoint;
 
                 // Now calling the async version of SendRelay
-                return await SendRelayAsync(protocol, dstEndPoint, buffer, serverEndPoint, NominatedEntry.LocalCandidate.IceServer, onFailure);
+                return await SendRelayAsync(protocol, dstEndPoint, buffer, serverEndPoint, NominatedEntry.LocalCandidate.IceServer, onFailure).ConfigureAwait(false);
             }
             else
             {
                 // Now calling the async base method
-                return await base.SendAsync(sendOn, dstEndPoint, buffer, onFailure);
+                return await base.SendAsync(sendOn, dstEndPoint, buffer, onFailure).ConfigureAwait(false);
             }
         }
     }

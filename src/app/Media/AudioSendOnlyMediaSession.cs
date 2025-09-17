@@ -65,7 +65,7 @@ namespace SIPSorcery.Media
         {
             try
             {
-                await SendAudioAsync(duration, buffer);
+                await SendAudioAsync(duration, buffer).ConfigureAwait(false);
             }
             catch (Exception excp)
             {

@@ -1699,8 +1699,7 @@ namespace SIPSorcery.SIP.App
 
                     if (setDescriptionResult == SetDescriptionResultEnum.OK)
                     {
-                        await MediaSession.Start()
-                                          .ConfigureAwait(false);
+                        await MediaSession.Start().ConfigureAwait(false);
                     }
                 }
 
@@ -1778,8 +1777,7 @@ namespace SIPSorcery.SIP.App
                     {
                         try
                         {
-                            await MediaSession.Start()
-                                              .ConfigureAwait(false);
+                            await MediaSession.Start().ConfigureAwait(false);
                         }
                         catch (Exception ex)
                         {

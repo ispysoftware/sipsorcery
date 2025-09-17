@@ -32,12 +32,12 @@ public class STUNClient
 
             var initMessage = new STUNMessage(STUNMessageTypesEnum.BindingRequest);
             byte[] stunMessageBytes = initMessage.ToByteBuffer(null, false);
-            await udpClient.SendAsync(stunMessageBytes, stunMessageBytes.Length);
+            await udpClient.SendAsync(stunMessageBytes, stunMessageBytes.Length).ConfigureAwait(false);
 
             var receiveTask = udpClient.ReceiveAsync();
             var delayTask = Task.Delay(TimeSpan.FromSeconds(STUN_SERVER_RESPONSE_TIMEOUT_SECONDS));
 
-            var winner = await Task.WhenAny(receiveTask, delayTask);
+            var winner = await Task.WhenAny(receiveTask, delayTask).ConfigureAwait(false);
 
             if (winner != receiveTask)
             {
@@ -45,7 +45,7 @@ public class STUNClient
                 return null;
             }
 
-            var result = await receiveTask; // This won't block as the task is already complete.
+            var result = await receiveTask.ConfigureAwait(false); // This won't block as the task is already complete.
 
             if (result.Buffer?.Length > 0)
             {
@@ -128,16 +128,16 @@ public class STUNClient
         {
             var initMessage = new STUNMessage(STUNMessageTypesEnum.BindingRequest);
             var bytes = initMessage.ToByteBuffer(null, false);
-            await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, stunServer, bytes);
+            await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, stunServer, bytes).ConfigureAwait(false);
 
             var delayTask = Task.Delay(TimeSpan.FromSeconds(STUN_SERVER_RESPONSE_TIMEOUT_SECONDS));
-            if (await Task.WhenAny(tcs.Task, delayTask) == delayTask)
+            if (await Task.WhenAny(tcs.Task, delayTask).ConfigureAwait(false) == delayTask)
             {
                 logger.LogWarning("STUNClient server response timed out after {Timeout}s.", STUN_SERVER_RESPONSE_TIMEOUT_SECONDS);
                 return null;
             }
 
-            return await tcs.Task;
+            return await tcs.Task.ConfigureAwait(false);
         }
         catch (Exception ex)
         {

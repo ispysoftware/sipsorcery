@@ -2282,7 +2282,8 @@ namespace SIPSorcery.Net
         /// <param name="sample">The audio sample to set as the RTP packet payload.</param>
         public async Task SendAudioAsync(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
         {
-            await AudioStream?.SendAudioAsync(durationRtpUnits, sample);
+            if (AudioStream!=null)
+                await AudioStream.SendAudioAsync(durationRtpUnits, sample).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -2293,7 +2294,8 @@ namespace SIPSorcery.Net
         /// <param name="sample">The video sample to set as the RTP packet payload.</param>
         public async Task SendVideoAsync(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
         {
-            await VideoStream?.SendVideoAsync(durationRtpUnits, sample);
+            if (VideoStream!=null)
+                await VideoStream.SendVideoAsync(durationRtpUnits, sample).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -2302,7 +2304,8 @@ namespace SIPSorcery.Net
         /// <param name="sample">The text sample to set as the RTP packet payload.</param>
         public async Task SendText(byte[] sample)
         {
-            await TextStream?.SendTextAsync(sample);
+            if (TextStream!=null)
+                await TextStream.SendTextAsync(sample).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -2705,17 +2708,17 @@ namespace SIPSorcery.Net
         /// <param name="seqNum">The sequence number of the packet.</param>
         public async Task SendRtpRawAsync(SDPMediaTypesEnum mediaType, byte[] payload, uint timestamp, int markerBit, int payloadTypeID, ushort seqNum)
         {
-            if (mediaType == SDPMediaTypesEnum.audio)
+            if (mediaType == SDPMediaTypesEnum.audio && AudioStream!=null)
             {
-                await AudioStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID, seqNum);
+                await AudioStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID, seqNum).ConfigureAwait(false);
             }
-            else if (mediaType == SDPMediaTypesEnum.video)
+            else if (mediaType == SDPMediaTypesEnum.video && VideoStream!=null)
             {
-                await VideoStream?.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID, seqNum);
+                await VideoStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID, seqNum).ConfigureAwait(false);
             }
-            else if (mediaType == SDPMediaTypesEnum.text)
+            else if (mediaType == SDPMediaTypesEnum.text && TextStream!=null)
             {
-                await TextStream?.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID, seqNum);
+                await TextStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID, seqNum).ConfigureAwait(false);
             }
         }
 
@@ -2729,13 +2732,17 @@ namespace SIPSorcery.Net
         /// <param name="payloadTypeID">The payload ID to set in the RTP header.</param>
         public async Task SendRtpRawAsync(SDPMediaTypesEnum mediaType, byte[] payload, uint timestamp, int markerBit, int payloadTypeID)
         {
-            if (mediaType == SDPMediaTypesEnum.audio)
+            if (mediaType == SDPMediaTypesEnum.audio && AudioStream!=null)
             {
-                await AudioStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID);
+                await AudioStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID).ConfigureAwait(false);
             }
-            else if (mediaType == SDPMediaTypesEnum.video)
+            else if (mediaType == SDPMediaTypesEnum.video && VideoStream!=null)
             {
-                await VideoStream?.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID);
+                await VideoStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID).ConfigureAwait(false);
+            }
+            else if (mediaType == SDPMediaTypesEnum.text && TextStream != null)
+            {
+                await TextStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID).ConfigureAwait(false);
             }
         }
 
@@ -2748,15 +2755,15 @@ namespace SIPSorcery.Net
         {
             if (mediaType == SDPMediaTypesEnum.audio)
             {
-                await AudioStream.SendRtcpRawAsync(payload);
+                await AudioStream.SendRtcpRawAsync(payload).ConfigureAwait(false);
             }
-            else if (mediaType == SDPMediaTypesEnum.video)
+            else if (mediaType == SDPMediaTypesEnum.video && VideoStream != null)
             {
-                await VideoStream?.SendRtcpRawAsync(payload);
+                await VideoStream.SendRtcpRawAsync(payload).ConfigureAwait(false);
             }
-            else if (mediaType == SDPMediaTypesEnum.text)
+            else if (mediaType == SDPMediaTypesEnum.text && TextStream != null)
             {
-                await TextStream?.SendRtcpRawAsync(payload);
+                await TextStream.SendRtcpRawAsync(payload).ConfigureAwait(false);
             }
         }
 
@@ -2817,17 +2824,17 @@ namespace SIPSorcery.Net
         /// <param name="feedback">The feedback report to send.</param>
         public async Task SendRtcpTWCCFeedbackAsync(SDPMediaTypesEnum mediaType, RTCPTWCCFeedback feedback)
         {
-            if (mediaType == SDPMediaTypesEnum.audio)
+            if (mediaType == SDPMediaTypesEnum.audio && AudioStream!=null)
             {
-                await AudioStream.SendRtcpTWCCFeedbackAsync(feedback);
+                await AudioStream.SendRtcpTWCCFeedbackAsync(feedback).ConfigureAwait(false);
             }
-            else if (mediaType == SDPMediaTypesEnum.video)
+            else if (mediaType == SDPMediaTypesEnum.video && VideoStream!=null)
             {
-                await VideoStream?.SendRtcpTWCCFeedbackAsync(feedback);
+                await VideoStream.SendRtcpTWCCFeedbackAsync(feedback).ConfigureAwait(false);
             }
-            else if (mediaType == SDPMediaTypesEnum.text)
+            else if (mediaType == SDPMediaTypesEnum.text && TextStream!=null)
             {
-                await TextStream?.SendRtcpTWCCFeedbackAsync(feedback);
+                await TextStream.SendRtcpTWCCFeedbackAsync(feedback).ConfigureAwait(false);
             }
         }
 
