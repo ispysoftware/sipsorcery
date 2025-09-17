@@ -1,8 +1,10 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.Media.G729Codec;
 using SIPSorcery.Net;
 using SIPSorcery.SIP.App;
 using SIPSorceryMedia.Abstractions;
@@ -24,7 +26,7 @@ namespace SIPSorcery.Media
         {
             // The audio extras source is used for on-hold music.
             AudioExtrasSource = new AudioExtrasSource(new AudioEncoder(), new AudioSourceOptions { AudioSource = AudioSourcesEnum.Music });
-            AudioExtrasSource.OnAudioSourceEncodedSample += SendAudio;
+            AudioExtrasSource.OnAudioSourceEncodedSample += HandleAudioSampleAsync;
 
             base.OnAudioFormatsNegotiated += AudioFormatsNegotiated;
 
@@ -54,8 +56,20 @@ namespace SIPSorcery.Media
             {
                 base.Close(reason);
 
-                AudioExtrasSource.OnAudioSourceEncodedSample -= SendAudio;
+                AudioExtrasSource.OnAudioSourceEncodedSample -= HandleAudioSampleAsync;
                 await AudioExtrasSource.CloseAudio().ConfigureAwait(false);
+            }
+        }
+
+        private async void HandleAudioSampleAsync(uint duration, ReadOnlyMemory<byte> buffer)
+        {
+            try
+            {
+                await SendAudioAsync(duration, buffer);
+            }
+            catch (Exception excp)
+            {
+                logger.LogError($"Exception handling video source sample: {excp.Message}");
             }
         }
     }

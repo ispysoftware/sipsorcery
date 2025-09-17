@@ -2280,9 +2280,9 @@ namespace SIPSorcery.Net
         /// <param name="durationRtpUnits">The duration in RTP timestamp units of the audio sample. This
         /// value is added to the previous RTP timestamp when building the RTP header.</param>
         /// <param name="sample">The audio sample to set as the RTP packet payload.</param>
-        public void SendAudio(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
+        public async Task SendAudioAsync(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
         {
-            AudioStream?.SendAudio(durationRtpUnits, sample.Span);
+            await AudioStream?.SendAudioAsync(durationRtpUnits, sample);
         }
 
         /// <summary>
@@ -2291,18 +2291,18 @@ namespace SIPSorcery.Net
         /// <param name="durationRtpUnits">The duration in RTP timestamp units of the video sample. This
         /// value is added to the previous RTP timestamp when building the RTP header.</param>
         /// <param name="sample">The video sample to set as the RTP packet payload.</param>
-        public void SendVideo(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
+        public async Task SendVideoAsync(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
         {
-            VideoStream?.SendVideo(durationRtpUnits, sample);
+            await VideoStream?.SendVideoAsync(durationRtpUnits, sample);
         }
 
         /// <summary>
         /// Sends a text sample to the remote peer. (on the primary one)
         /// </summary>
         /// <param name="sample">The text sample to set as the RTP packet payload.</param>
-        public void SendText(byte[] sample)
+        public async Task SendText(byte[] sample)
         {
-            TextStream?.SendText(sample);
+            await TextStream?.SendTextAsync(sample);
         }
 
         /// <summary>
@@ -2703,19 +2703,19 @@ namespace SIPSorcery.Net
         /// <param name="markerBit">The value to set on the RTP header marker bit, should be 0 or 1.</param>
         /// <param name="payloadTypeID">The payload ID to set in the RTP header.</param>
         /// <param name="seqNum">The sequence number of the packet.</param>
-        public void SendRtpRaw(SDPMediaTypesEnum mediaType, byte[] payload, uint timestamp, int markerBit, int payloadTypeID, ushort seqNum)
+        public async Task SendRtpRawAsync(SDPMediaTypesEnum mediaType, byte[] payload, uint timestamp, int markerBit, int payloadTypeID, ushort seqNum)
         {
             if (mediaType == SDPMediaTypesEnum.audio)
             {
-                AudioStream.SendRtpRaw(payload, timestamp, markerBit, payloadTypeID, seqNum);
+                await AudioStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID, seqNum);
             }
             else if (mediaType == SDPMediaTypesEnum.video)
             {
-                VideoStream?.SendRtpRaw(payload, timestamp, markerBit, payloadTypeID, seqNum);
+                await VideoStream?.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID, seqNum);
             }
             else if (mediaType == SDPMediaTypesEnum.text)
             {
-                TextStream?.SendRtpRaw(payload, timestamp, markerBit, payloadTypeID, seqNum);
+                await TextStream?.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID, seqNum);
             }
         }
 
@@ -2727,15 +2727,15 @@ namespace SIPSorcery.Net
         /// <param name="timestamp">The timestamp to set on the RTP header.</param>
         /// <param name="markerBit">The value to set on the RTP header marker bit, should be 0 or 1.</param>
         /// <param name="payloadTypeID">The payload ID to set in the RTP header.</param>
-        public void SendRtpRaw(SDPMediaTypesEnum mediaType, byte[] payload, uint timestamp, int markerBit, int payloadTypeID)
+        public async Task SendRtpRawAsync(SDPMediaTypesEnum mediaType, byte[] payload, uint timestamp, int markerBit, int payloadTypeID)
         {
             if (mediaType == SDPMediaTypesEnum.audio)
             {
-                AudioStream.SendRtpRaw(payload, timestamp, markerBit, payloadTypeID);
+                await AudioStream.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID);
             }
             else if (mediaType == SDPMediaTypesEnum.video)
             {
-                VideoStream?.SendRtpRaw(payload, timestamp, markerBit, payloadTypeID);
+                await VideoStream?.SendRtpRawAsync(payload, timestamp, markerBit, payloadTypeID);
             }
         }
 
@@ -2744,19 +2744,19 @@ namespace SIPSorcery.Net
         /// </summary>
         /// <param name="mediaType">The media type of the RTCP packet being sent. Must be audio or video.</param>
         /// <param name="payload">The RTCP packet payload.</param>
-        public void SendRtcpRaw(SDPMediaTypesEnum mediaType, byte[] payload)
+        public async Task SendRtcpRawAsync(SDPMediaTypesEnum mediaType, byte[] payload)
         {
             if (mediaType == SDPMediaTypesEnum.audio)
             {
-                AudioStream.SendRtcpRaw(payload);
+                await AudioStream.SendRtcpRawAsync(payload);
             }
             else if (mediaType == SDPMediaTypesEnum.video)
             {
-                VideoStream?.SendRtcpRaw(payload);
+                await VideoStream?.SendRtcpRawAsync(payload);
             }
             else if (mediaType == SDPMediaTypesEnum.text)
             {
-                TextStream?.SendRtcpRaw(payload);
+                await TextStream?.SendRtcpRawAsync(payload);
             }
         }
 
@@ -2815,19 +2815,19 @@ namespace SIPSorcery.Net
         /// </summary>
         /// <param name="mediaType">The media type of the RTCP report  being sent. Must be audio or video.</param>
         /// <param name="feedback">The feedback report to send.</param>
-        public void SendRtcpTWCCFeedback(SDPMediaTypesEnum mediaType, RTCPTWCCFeedback feedback)
+        public async Task SendRtcpTWCCFeedbackAsync(SDPMediaTypesEnum mediaType, RTCPTWCCFeedback feedback)
         {
             if (mediaType == SDPMediaTypesEnum.audio)
             {
-                AudioStream.SendRtcpTWCCFeedback(feedback);
+                await AudioStream.SendRtcpTWCCFeedbackAsync(feedback);
             }
             else if (mediaType == SDPMediaTypesEnum.video)
             {
-                VideoStream?.SendRtcpTWCCFeedback(feedback);
+                await VideoStream?.SendRtcpTWCCFeedbackAsync(feedback);
             }
             else if (mediaType == SDPMediaTypesEnum.text)
             {
-                TextStream?.SendRtcpTWCCFeedback(feedback);
+                await TextStream?.SendRtcpTWCCFeedbackAsync(feedback);
             }
         }
 

@@ -80,14 +80,14 @@ namespace SIPSorcery.Net
         /// <param name="durationRtpUnits">The duration in RTP timestamp units of the audio sample. This
         /// value is added to the previous RTP timestamp when building the RTP header.</param>
         /// <param name="sample">The audio sample to set as the RTP packet payload.</param>
-        public void SendAudio(uint durationRtpUnits, ReadOnlySpan<byte> sample)
+        public async Task SendAudioAsync(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
         {
             if (!sendingFormatFound)
             {
                 NegotiatedFormat = GetSendingFormat();
                 sendingFormatFound = true;
             }
-            SendAudioFrame(durationRtpUnits, NegotiatedFormat.ID, sample);
+            await SendAudioFrameAsync(durationRtpUnits, NegotiatedFormat.ID, sample);
         }
 
         /// <summary>
@@ -96,9 +96,9 @@ namespace SIPSorcery.Net
         /// <param name="durationRtpUnits">The duration in RTP timestamp units of the audio sample. This
         /// value is added to the previous RTP timestamp when building the RTP header.</param>
         /// <param name="sample">The audio sample to set as the RTP packet payload.</param>
-        public void SendAudio(uint durationRtpUnits, byte[] sample)
+        public async Task SendAudio(uint durationRtpUnits, byte[] sample)
         {
-            SendAudio(durationRtpUnits, new ArraySegment<byte>(sample));
+            await SendAudioAsync(durationRtpUnits, new ArraySegment<byte>(sample));
         }
 
         /// <summary>
@@ -108,7 +108,7 @@ namespace SIPSorcery.Net
         /// gets added onto the timestamp being set in the RTP header.</param>
         /// <param name="payloadTypeID">The payload ID to set in the RTP header.</param>
         /// <param name="bufferSegment">The audio payload to send.</param>
-        public void SendAudioFrame(uint duration, int payloadTypeID, ReadOnlySpan<byte> buffer)
+        public async Task SendAudioFrameAsync(uint duration, int payloadTypeID, ReadOnlyMemory<byte> buffer)
         {
             if (CheckIfCanSendRtpRaw())
             {
@@ -139,10 +139,10 @@ namespace SIPSorcery.Net
                         int markerBit = 0;
 
                         // The slicing logic is now much simpler and cleaner, no #if needed.
-                        ReadOnlySpan<byte> packetPayload = buffer.Slice(offset, payloadLength);
+                        ReadOnlyMemory<byte> packetPayload = buffer.Slice(offset, payloadLength);
 
                         // Assuming SendRtpRaw is also updated to take a ReadOnlySpan<byte>
-                        SendRtpRaw(packetPayload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                        await SendRtpRawAsync(packetPayload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
 
                         LocalTrack.Timestamp += packetDuration;
                         totalIncrement += packetDuration;
@@ -167,9 +167,9 @@ namespace SIPSorcery.Net
         /// gets added onto the timestamp being set in the RTP header.</param>
         /// <param name="payloadTypeID">The payload ID to set in the RTP header.</param>
         /// <param name="buffer">The audio payload to send.</param>
-        public void SendAudioFrame(uint duration, int payloadTypeID, byte[] buffer)
+        public async Task SendAudioFrameAsync(uint duration, int payloadTypeID, byte[] buffer)
         {
-            SendAudioFrame(duration, payloadTypeID, new ArraySegment<byte>(buffer));
+            await SendAudioFrameAsync(duration, payloadTypeID, new ArraySegment<byte>(buffer));
         }
 
         /// <summary>
@@ -212,7 +212,7 @@ namespace SIPSorcery.Net
 
                         int markerBit = (i == 0) ? 1 : 0;  // Set marker bit for the first packet in the event.
 
-                        SendRtpRaw(buffer, LocalTrack.Timestamp, markerBit, rtpEvent.PayloadTypeID, true);
+                        await SendRtpRawAsync(buffer, LocalTrack.Timestamp, markerBit, rtpEvent.PayloadTypeID, true);
                     }
 
                     await Task.Delay(samplePeriod, cancellationToken).ConfigureAwait(false);
@@ -225,7 +225,7 @@ namespace SIPSorcery.Net
                             rtpEvent.Duration += rtpTimestampStep;
                             byte[] buffer = rtpEvent.GetEventPayload();
 
-                            SendRtpRaw(buffer, LocalTrack.Timestamp, 0, rtpEvent.PayloadTypeID, true);
+                            await SendRtpRawAsync(buffer, LocalTrack.Timestamp, 0, rtpEvent.PayloadTypeID, true);
 
                             await Task.Delay(samplePeriod, cancellationToken).ConfigureAwait(false);
                         }
@@ -237,7 +237,7 @@ namespace SIPSorcery.Net
                             rtpEvent.Duration = rtpEvent.TotalDuration;
                             byte[] buffer = rtpEvent.GetEventPayload();
 
-                            SendRtpRaw(buffer, LocalTrack.Timestamp, 0, rtpEvent.PayloadTypeID, true);
+                            await SendRtpRawAsync(buffer, LocalTrack.Timestamp, 0, rtpEvent.PayloadTypeID, true);
                         }
                     }
                     LocalTrack.Timestamp += rtpEvent.TotalDuration;

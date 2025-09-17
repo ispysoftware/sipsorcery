@@ -476,7 +476,7 @@ namespace SIPSorcery.Net
 
                     try
                     {
-                        bool handshakeResult = await Task.Run(() => DoDtlsHandshake(_dtlsHandle)).ConfigureAwait(false);
+                        bool handshakeResult = await Task.Run(() => DoDtlsHandshakeAsync(_dtlsHandle)).ConfigureAwait(false);
 
                         connectionState = (handshakeResult) ? RTCPeerConnectionState.connected : connectionState = RTCPeerConnectionState.failed;
                         onconnectionstatechange?.Invoke(connectionState);
@@ -1721,6 +1721,18 @@ namespace SIPSorcery.Net
             }
         }
 
+        private async void SendDtlsPacketAsync(RTPChannel rtpChannel, IPEndPoint destination, byte[] buffer)
+        {
+            try
+            {
+                await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, destination, buffer);
+            }
+            catch (Exception excp)
+            {
+                logger.LogError($"Exception sending DTLS packet in SendDtlsPacketAsync. {excp}");
+            }
+        }
+
         /// <summary>
         ///  DtlsHandshake requires DtlsSrtpTransport to work.
         ///  DtlsSrtpTransport is similar to C++ DTLS class combined with Srtp class and can perform 
@@ -1729,24 +1741,31 @@ namespace SIPSorcery.Net
         /// </summary>
         /// <param name="dtlsHandle">The DTLS transport handle to perform the handshake with.</param>
         /// <returns>True if the DTLS handshake is successful or false if not.</returns>
-        private bool DoDtlsHandshake(DtlsSrtpTransport dtlsHandle)
+        private async Task<bool> DoDtlsHandshakeAsync(DtlsSrtpTransport dtlsHandle)
         {
-            logger.LogDebug("RTCPeerConnection DoDtlsHandshake started.");
+            logger.LogDebug("RTCPeerConnection DoDtlsHandshakeAsync started.");
 
             var rtpChannel = PrimaryStream.GetRTPChannel();
 
+            // The event handler MUST be synchronous to accept the ReadOnlySpan.
+            // Inside, it copies the data and calls an async helper method.
             dtlsHandle.OnDataReady += (buf) =>
             {
-                //logger.LogDebug($"DTLS transport sending {buf.Length} bytes to {AudioDestinationEndPoint}.");
-                rtpChannel.Send(RTPChannelSocketsEnum.RTP, PrimaryStream.DestinationEndPoint, buf);
+                SendDtlsPacketAsync(rtpChannel, PrimaryStream.DestinationEndPoint, buf.ToArray());
             };
 
-            var handshakeResult = dtlsHandle.DoHandshake(out var handshakeError);
+            // Run the blocking DoHandshake method on a background thread.
+            var (handshakeResult, handshakeError) = await Task.Run(() =>
+            {
+                string error = null;
+                bool result = dtlsHandle.DoHandshake(out error);
+                return (Success: result, Error: error);
+            });
+
 
             if (!handshakeResult)
             {
-                handshakeError = handshakeError ?? "unknown";
-                logger.LogWarning($"RTCPeerConnection DTLS handshake failed with error {handshakeError}.");
+                logger.LogWarning($"RTCPeerConnection DTLS handshake failed with error {handshakeError ?? "unknown"}.");
                 Close("dtls handshake failed");
                 return false;
             }
@@ -1771,7 +1790,6 @@ namespace SIPSorcery.Net
                         dtlsHandle.UnprotectRTP,
                         dtlsHandle.ProtectRTCP,
                         dtlsHandle.UnprotectRTCP);
-
 
                     IsDtlsNegotiationComplete = true;
 

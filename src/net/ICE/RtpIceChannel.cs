@@ -1120,7 +1120,7 @@ namespace SIPSorcery.Net
         }
 
         //
-        private void RefreshTurn(Object state)
+        private async void RefreshTurnAsync(Object state)
         {
             try
             {
@@ -1141,7 +1141,9 @@ namespace SIPSorcery.Net
                 if (_activeIceServer.TurnTimeToExpiry.Subtract(DateTime.Now) <= TimeSpan.FromMinutes(1))
                 {
                     logger.LogDebug($"Sending TURN refresh request to ICE server {_activeIceServer._uri}.");
-                    _activeIceServer.Error = SendTurnRefreshRequest(_activeIceServer);
+
+                    // Await the non-blocking refresh request.
+                    _activeIceServer.Error = await SendTurnRefreshRequestAsync(_activeIceServer);
                 }
 
                 if (NominatedEntry.TurnPermissionsRequestSent >= IceServer.MAX_REQUESTS)
@@ -1149,19 +1151,21 @@ namespace SIPSorcery.Net
                     logger.LogWarning($"ICE RTP channel failed to get a Create Permissions response from {NominatedEntry.LocalCandidate.IceServer._uri} after {NominatedEntry.TurnPermissionsRequestSent} attempts.");
                 }
                 else if (NominatedEntry.TurnPermissionsRequestSent != 1 || NominatedEntry.TurnPermissionsResponseAt == DateTime.MinValue || DateTime.Now.Subtract(NominatedEntry.TurnPermissionsResponseAt).TotalSeconds >
-                         REFRESH_PERMISSION_PERIOD)
+                            REFRESH_PERMISSION_PERIOD)
                 {
                     // Send Create Permissions request to TURN server for remote candidate.
                     NominatedEntry.TurnPermissionsRequestSent++;
                     logger.LogDebug($"ICE RTP channel sending TURN permissions request {NominatedEntry.TurnPermissionsRequestSent} " +
                                     $"to server {NominatedEntry.LocalCandidate.IceServer._uri} for peer {NominatedEntry.RemoteCandidate.DestinationEndPoint} " +
                                     $"(TxID: {NominatedEntry.RequestTransactionID}).");
-                    SendTurnCreatePermissionsRequest(NominatedEntry.RequestTransactionID, NominatedEntry.LocalCandidate.IceServer, NominatedEntry.RemoteCandidate.DestinationEndPoint);
+
+                    // Await the non-blocking permissions request.
+                    await SendTurnCreatePermissionsRequestAsync(NominatedEntry.RequestTransactionID, NominatedEntry.LocalCandidate.IceServer, NominatedEntry.RemoteCandidate.DestinationEndPoint);
                 }
             }
             catch (Exception excp)
             {
-                logger.LogError($"Exception {nameof(RefreshTurn)}." + excp);
+                logger.LogError($"Exception {nameof(RefreshTurnAsync)}." + excp);
             }
         }
 
@@ -1171,20 +1175,20 @@ namespace SIPSorcery.Net
         /// is provided it will take precedence as it can potentially supply both Server Reflexive 
         /// and Relay candidates.
         /// </summary>
-        private void CheckIceServers(Object state)
+        private async void CheckIceServers(Object state)
         {
             if (_closed || IceGatheringState == RTCIceGatheringState.complete ||
                 !(IceConnectionState == RTCIceConnectionState.@new || IceConnectionState == RTCIceConnectionState.checking))
             {
                 logger.LogDebug($"ICE RTP channel stopping ICE server checks in gathering state {IceGatheringState} and connection state {IceConnectionState}.");
                 _refreshTurnTimer?.Dispose();
-                _refreshTurnTimer = new Timer(RefreshTurn);
+                _refreshTurnTimer = new Timer(RefreshTurnAsync);
                 _refreshTurnTimer.Change(0, 2000);
                 _processIceServersTimer.Dispose();
                 return;
             }
 
-            // The lock is to ensure the timer callback doesn't run multiple instances in parallel. 
+            // The lock ensures the timer callback doesn't run multiple instances in parallel, even with await.
             if (Monitor.TryEnter(_iceServerConnections))
             {
                 try
@@ -1216,9 +1220,8 @@ namespace SIPSorcery.Net
                         }
                     }
 
-                    // Run a state machine on the active ICE server.
+                    // --- State machine logic ---
 
-                    // Something went wrong. An active server could not be set.
                     if (_activeIceServer == null)
                     {
                         logger.LogDebug("RTP ICE Channel was not able to acquire an active ICE server, stopping ICE servers timer.");
@@ -1229,15 +1232,12 @@ namespace SIPSorcery.Net
                     {
                         // Successfully set up the ICE server. Do nothing.
                     }
-                    // If the ICE server hasn't yet been resolved initiate the DNS check.
                     else if (_activeIceServer.ServerEndPoint == null && _activeIceServer.DnsLookupSentAt == DateTime.MinValue)
                     {
                         logger.LogDebug($"Attempting to resolve STUN server URI {_activeIceServer._uri}.");
-
                         _activeIceServer.DnsLookupSentAt = DateTime.Now;
 
-                        // Don't stop and wait for DNS. Let the timer callback complete and check for the DNS
-                        // result on the next few timer callbacks.
+                        // This fire-and-forget task for DNS is already a good non-blocking pattern.
                         Task.Run(async () =>
                         {
                             try
@@ -1253,46 +1253,49 @@ namespace SIPSorcery.Net
                             }
                         });
                     }
-                    // Waiting for DNS lookup to complete.
                     else if (_activeIceServer.ServerEndPoint == null &&
                         DateTime.Now.Subtract(_activeIceServer.DnsLookupSentAt).TotalSeconds < IceServer.DNS_LOOKUP_TIMEOUT_SECONDS)
                     {
-                        // Do nothing.
+                        // Waiting for DNS lookup to complete.
                     }
-                    // DNS lookup for ICE server host has timed out.
                     else if (_activeIceServer.ServerEndPoint == null)
                     {
                         logger.LogWarning($"ICE server DNS resolution failed for {_activeIceServer._uri}.");
                         _activeIceServer.Error = SocketError.TimedOut;
                     }
-                    // Maximum number of requests have been sent to the ICE server without a response.
                     else if (_activeIceServer.OutstandingRequestsSent >= IceServer.MAX_REQUESTS && _activeIceServer.LastResponseReceivedAt == DateTime.MinValue)
                     {
                         logger.LogWarning($"Connection attempt to ICE server {_activeIceServer._uri} timed out after {_activeIceServer.OutstandingRequestsSent} requests.");
                         _activeIceServer.Error = SocketError.TimedOut;
                     }
-                    // Maximum number of error response have been received for the requests sent to this ICE server.
                     else if (_activeIceServer.ErrorResponseCount >= IceServer.MAX_ERRORS)
                     {
                         logger.LogWarning($"Connection attempt to ICE server {_activeIceServer._uri} cancelled after {_activeIceServer.ErrorResponseCount} error responses.");
                         _activeIceServer.Error = SocketError.TimedOut;
                     }
-                    // Send STUN binding request.
                     else if (_activeIceServer.ServerReflexiveEndPoint == null && _activeIceServer._uri.Scheme == STUNSchemesEnum.stun)
                     {
-                        logger.LogDebug($"Sending STUN binding request to ICE server {_activeIceServer._uri}  with address {_activeIceServer.ServerEndPoint}.");
-                        _activeIceServer.Error = SendStunBindingRequest(_activeIceServer);
+                        logger.LogDebug($"Sending STUN binding request to ICE server {_activeIceServer._uri} with address {_activeIceServer.ServerEndPoint}.");
+
+                        // Await the asynchronous send method.
+                        _activeIceServer.Error = await SendStunBindingRequestAsync(_activeIceServer);
                     }
-                    // Send TURN binding request.
                     else if (_activeIceServer.ServerReflexiveEndPoint == null && _activeIceServer._uri.Scheme == STUNSchemesEnum.turn)
                     {
                         logger.LogDebug($"Sending TURN allocate request to ICE server {_activeIceServer._uri} with address {_activeIceServer.ServerEndPoint}.");
-                        _activeIceServer.Error = SendTurnAllocateRequest(_activeIceServer);
+
+                        // Await the asynchronous send method.
+                        _activeIceServer.Error = await SendTurnAllocateRequestAsync(_activeIceServer);
                     }
                     else
                     {
                         logger.LogWarning($"The active ICE server reached an unexpected state {_activeIceServer._uri}.");
                     }
+                }
+                catch (Exception excp)
+                {
+                    // Catching exceptions is important for "async void" methods.
+                    logger.LogError($"Exception in CheckIceServers timer callback. {excp}");
                 }
                 finally
                 {
@@ -1628,7 +1631,7 @@ namespace SIPSorcery.Net
 
                                 if (nextEntry != null)
                                 {
-                                    SendConnectivityCheck(nextEntry, false);
+                                    SendConnectivityCheckAsync(nextEntry, false);
                                     return;
                                 }
 
@@ -1639,7 +1642,7 @@ namespace SIPSorcery.Net
 
                                 if (retransmitEntry != null)
                                 {
-                                    SendConnectivityCheck(retransmitEntry, false);
+                                    SendConnectivityCheckAsync(retransmitEntry, false);
                                     return;
                                 }
 
@@ -1754,55 +1757,66 @@ namespace SIPSorcery.Net
         /// - Packets need to be sent and received as TURN Channel Data messages.
         /// </remarks>
         /// 
-        private void SendConnectivityCheck(ChecklistEntry candidatePair, bool setUseCandidate)
+        private async void SendConnectivityCheckAsync(ChecklistEntry candidatePair, bool setUseCandidate)
         {
-            if (_closed)
+            // Wrap in a try/catch block, which is a best practice for "async void" methods.
+            try
             {
-                return;
-            }
-
-            if (candidatePair.FirstCheckSentAt == DateTime.MinValue)
-            {
-                candidatePair.FirstCheckSentAt = DateTime.Now;
-                candidatePair.State = ChecklistEntryState.InProgress;
-            }
-
-            candidatePair.LastCheckSentAt = DateTime.Now;
-            candidatePair.ChecksSent++;
-            candidatePair.RequestTransactionID = Crypto.GetRandomString(STUNHeader.TRANSACTION_ID_LENGTH);
-
-            bool isRelayCheck = candidatePair.LocalCandidate.type == RTCIceCandidateType.relay;
-            //bool isTcpProtocol = candidatePair.LocalCandidate.IceServer?.Protocol == ProtocolType.Tcp;
-
-            if (isRelayCheck && candidatePair.TurnPermissionsResponseAt == DateTime.MinValue)
-            {
-                if (candidatePair.TurnPermissionsRequestSent >= IceServer.MAX_REQUESTS)
+                if (_closed)
                 {
-                    logger.LogWarning($"ICE RTP channel failed to get a Create Permissions response from {candidatePair.LocalCandidate.IceServer._uri} after {candidatePair.TurnPermissionsRequestSent} attempts.");
-                    candidatePair.State = ChecklistEntryState.Failed;
+                    return;
+                }
+
+                if (candidatePair.FirstCheckSentAt == DateTime.MinValue)
+                {
+                    candidatePair.FirstCheckSentAt = DateTime.Now;
+                    candidatePair.State = ChecklistEntryState.InProgress;
+                }
+
+                candidatePair.LastCheckSentAt = DateTime.Now;
+                candidatePair.ChecksSent++;
+                candidatePair.RequestTransactionID = Crypto.GetRandomString(STUNHeader.TRANSACTION_ID_LENGTH);
+
+                bool isRelayCheck = candidatePair.LocalCandidate.type == RTCIceCandidateType.relay;
+
+                if (isRelayCheck && candidatePair.TurnPermissionsResponseAt == DateTime.MinValue)
+                {
+                    if (candidatePair.TurnPermissionsRequestSent >= IceServer.MAX_REQUESTS)
+                    {
+                        logger.LogWarning($"ICE RTP channel failed to get a Create Permissions response from {candidatePair.LocalCandidate.IceServer._uri} after {candidatePair.TurnPermissionsRequestSent} attempts.");
+                        candidatePair.State = ChecklistEntryState.Failed;
+                    }
+                    else
+                    {
+                        // Send Create Permissions request to TURN server for remote candidate.
+                        candidatePair.TurnPermissionsRequestSent++;
+
+                        logger.LogDebug($"ICE RTP channel sending TURN permissions request {candidatePair.TurnPermissionsRequestSent} to server {candidatePair.LocalCandidate.IceServer._uri} for peer {candidatePair.RemoteCandidate.DestinationEndPoint} (TxID: {candidatePair.RequestTransactionID}).");
+
+                        // Await the task-based async method.
+                        await SendTurnCreatePermissionsRequestAsync(candidatePair.RequestTransactionID, candidatePair.LocalCandidate.IceServer, candidatePair.RemoteCandidate.DestinationEndPoint);
+                    }
                 }
                 else
                 {
-                    // Send Create Permissions request to TURN server for remote candidate.
-                    candidatePair.TurnPermissionsRequestSent++;
+                    if (candidatePair.LocalCandidate.type == RTCIceCandidateType.relay)
+                    {
+                        IPEndPoint relayServerEP = candidatePair.LocalCandidate.IceServer.ServerEndPoint;
+                        logger.LogDebug($"ICE RTP channel sending connectivity check for {candidatePair.LocalCandidate.ToShortString()}->{candidatePair.RemoteCandidate.ToShortString()} from {base.RTPLocalEndPoint} to relay at {relayServerEP} (use candidate {setUseCandidate}).");
+                    }
+                    else
+                    {
+                        IPEndPoint remoteEndPoint = candidatePair.RemoteCandidate.DestinationEndPoint;
+                        logger.LogDebug($"ICE RTP channel sending connectivity check for {candidatePair.LocalCandidate.ToShortString()}->{candidatePair.RemoteCandidate.ToShortString()} from {base.RTPLocalEndPoint} to {remoteEndPoint} (use candidate {setUseCandidate}).");
+                    }
 
-                    logger.LogDebug($"ICE RTP channel sending TURN permissions request {candidatePair.TurnPermissionsRequestSent} to server {candidatePair.LocalCandidate.IceServer._uri} for peer {candidatePair.RemoteCandidate.DestinationEndPoint} (TxID: {candidatePair.RequestTransactionID}).");
-                    SendTurnCreatePermissionsRequest(candidatePair.RequestTransactionID, candidatePair.LocalCandidate.IceServer, candidatePair.RemoteCandidate.DestinationEndPoint);
+                    // Call the "fire-and-forget" async void method.
+                    SendSTUNBindingRequestAsync(candidatePair, setUseCandidate);
                 }
             }
-            else
+            catch (Exception excp)
             {
-                if (candidatePair.LocalCandidate.type == RTCIceCandidateType.relay)
-                {
-                    IPEndPoint relayServerEP = candidatePair.LocalCandidate.IceServer.ServerEndPoint;
-                    logger.LogDebug($"ICE RTP channel sending connectivity check for {candidatePair.LocalCandidate.ToShortString()}->{candidatePair.RemoteCandidate.ToShortString()} from {base.RTPLocalEndPoint} to relay at {relayServerEP} (use candidate {setUseCandidate}).");
-                }
-                else
-                {
-                    IPEndPoint remoteEndPoint = candidatePair.RemoteCandidate.DestinationEndPoint;
-                    logger.LogDebug($"ICE RTP channel sending connectivity check for {candidatePair.LocalCandidate.ToShortString()}->{candidatePair.RemoteCandidate.ToShortString()} from {base.RTPLocalEndPoint} to {remoteEndPoint} (use candidate {setUseCandidate}).");
-                }
-                SendSTUNBindingRequest(candidatePair, setUseCandidate);
+                logger.LogError($"Exception in SendConnectivityCheckAsync. {excp}");
             }
         }
 
@@ -1812,48 +1826,60 @@ namespace SIPSorcery.Net
         /// <param name="candidatePair">The candidate pair identifying the remote peer to send the STUN Binding Request
         /// to.</param>
         /// <param name="setUseCandidate">Set to true to add a "UseCandidate" attribute to the STUN request.</param>
-        private void SendSTUNBindingRequest(ChecklistEntry candidatePair, bool setUseCandidate)
+        private async void SendSTUNBindingRequestAsync(ChecklistEntry candidatePair, bool setUseCandidate)
         {
-            STUNMessage stunRequest = new STUNMessage(STUNMessageTypesEnum.BindingRequest);
-            stunRequest.Header.TransactionId = Encoding.ASCII.GetBytes(candidatePair.RequestTransactionID);
-            stunRequest.AddUsernameAttribute(RemoteIceUser + ":" + LocalIceUser);
-            stunRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.Priority, BitConverter.GetBytes(candidatePair.LocalPriority)));
-
-            if (IsController)
+            // Wrap in a try/catch block, which is a best practice for "async void" methods.
+            try
             {
-                stunRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.IceControlling, NetConvert.GetBytes(_iceTiebreaker)));
-            }
-            else
-            {
-                stunRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.IceControlled, NetConvert.GetBytes(_iceTiebreaker)));
-            }
+                STUNMessage stunRequest = new STUNMessage(STUNMessageTypesEnum.BindingRequest);
+                stunRequest.Header.TransactionId = Encoding.ASCII.GetBytes(candidatePair.RequestTransactionID);
+                stunRequest.AddUsernameAttribute(RemoteIceUser + ":" + LocalIceUser);
+                stunRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.Priority, BitConverter.GetBytes(candidatePair.LocalPriority)));
 
-            if (setUseCandidate)
-            {
-                stunRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.UseCandidate, null));
-            }
-
-            byte[] stunReqBytes = stunRequest.ToByteBufferStringKey(RemoteIcePassword, true);
-
-            if (candidatePair.LocalCandidate.type == RTCIceCandidateType.relay)
-            {
-                IPEndPoint relayServerEP = candidatePair.LocalCandidate.IceServer.ServerEndPoint;
-                var protocol = candidatePair.LocalCandidate.IceServer.Protocol;
-                SendRelay(protocol, candidatePair.RemoteCandidate.DestinationEndPoint, stunReqBytes, relayServerEP, candidatePair.LocalCandidate.IceServer, OnBindingFailure);
-            }
-            else
-            {
-                IPEndPoint remoteEndPoint = candidatePair.RemoteCandidate.DestinationEndPoint;
-                var sendResult = base.Send(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunReqBytes, OnBindingFailure);
-
-                if (sendResult != SocketError.Success)
+                if (IsController)
                 {
-                    logger.LogWarning($"Error sending STUN server binding request to {remoteEndPoint}. {sendResult}.");
+                    stunRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.IceControlling, NetConvert.GetBytes(_iceTiebreaker)));
                 }
                 else
                 {
-                    OnStunMessageSent?.Invoke(stunRequest, remoteEndPoint, false);
+                    stunRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.IceControlled, NetConvert.GetBytes(_iceTiebreaker)));
                 }
+
+                if (setUseCandidate)
+                {
+                    stunRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.UseCandidate, null));
+                }
+
+                byte[] stunReqBytes = stunRequest.ToByteBufferStringKey(RemoteIcePassword, true);
+
+                if (candidatePair.LocalCandidate.type == RTCIceCandidateType.relay)
+                {
+                    IPEndPoint relayServerEP = candidatePair.LocalCandidate.IceServer.ServerEndPoint;
+                    var protocol = candidatePair.LocalCandidate.IceServer.Protocol;
+
+                    // Await the non-blocking relay send operation.
+                    await SendRelayAsync(protocol, candidatePair.RemoteCandidate.DestinationEndPoint, stunReqBytes, relayServerEP, candidatePair.LocalCandidate.IceServer, OnBindingFailure);
+                }
+                else
+                {
+                    IPEndPoint remoteEndPoint = candidatePair.RemoteCandidate.DestinationEndPoint;
+
+                    // Await the non-blocking send operation.
+                    var sendResult = await base.SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunReqBytes, OnBindingFailure);
+
+                    if (sendResult != SocketError.Success)
+                    {
+                        logger.LogWarning($"Error sending STUN server binding request to {remoteEndPoint}. {sendResult}.");
+                    }
+                    else
+                    {
+                        OnStunMessageSent?.Invoke(stunRequest, remoteEndPoint, false);
+                    }
+                }
+            }
+            catch (Exception excp)
+            {
+                logger.LogError($"Exception in SendSTUNBindingRequestAsync. {excp}");
             }
         }
 
@@ -1919,7 +1945,7 @@ namespace SIPSorcery.Net
                     candidatePair.LastCheckSentAt = DateTime.Now;
                     candidatePair.ChecksSent++;
 
-                    SendSTUNBindingRequest(candidatePair, false);
+                    SendSTUNBindingRequestAsync(candidatePair, false);
                 }
             }
         }
@@ -1968,7 +1994,7 @@ namespace SIPSorcery.Net
                 // be created.
                 if (stunMessage.Header.MessageType == STUNMessageTypesEnum.BindingRequest)
                 {
-                    GotStunBindingRequest(stunMessage, remoteEndPoint, wasRelayed);
+                    GotStunBindingRequestAsync(stunMessage, remoteEndPoint, wasRelayed);
                 }
                 else if (stunMessage.Header.MessageClass == STUNClassTypesEnum.ErrorResponse ||
                          stunMessage.Header.MessageClass == STUNClassTypesEnum.SuccessResponse)
@@ -2077,7 +2103,7 @@ namespace SIPSorcery.Net
                 if (possibleMatchingCheckEntry != null && possibleMatchingCheckEntry.State == ChecklistEntryState.Succeeded)
                 {
                     possibleMatchingCheckEntry.Nominated = true;
-                    SendConnectivityCheck(possibleMatchingCheckEntry, true);
+                    SendConnectivityCheckAsync(possibleMatchingCheckEntry, true);
                 }
             }
 
@@ -2107,136 +2133,135 @@ namespace SIPSorcery.Net
         /// <param name="remoteEndPoint">The end point the request was received from.</param>
         /// <param name="wasRelayed">True of the request was relayed via the TURN server in use
         /// by this ICE channel (i.e. the ICE server that this channel is acting as the client with).</param>
-        private void GotStunBindingRequest(STUNMessage bindingRequest, IPEndPoint remoteEndPoint, bool wasRelayed)
+        private async void GotStunBindingRequestAsync(STUNMessage bindingRequest, IPEndPoint remoteEndPoint, bool wasRelayed)
         {
-            if (_closed)
+            // Best practice for "async void" is to wrap the entire body in a try/catch
+            // to prevent any unhandled exceptions from crashing the application.
+            try
             {
-                return;
-            }
-
-            if (_policy == RTCIceTransportPolicy.relay && !wasRelayed)
-            {
-                // If the policy is "relay only" then direct binding requests are not accepted.
-                logger.LogWarning($"ICE RTP channel rejecting non-relayed STUN binding request from {remoteEndPoint}.");
-
-                STUNMessage stunErrResponse = new STUNMessage(STUNMessageTypesEnum.BindingErrorResponse);
-                stunErrResponse.Header.TransactionId = bindingRequest.Header.TransactionId;
-                Send(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false));
-
-                OnStunMessageSent?.Invoke(stunErrResponse, remoteEndPoint, false);
-            }
-            else
-            {
-                bool result = bindingRequest.CheckIntegrity(Encoding.UTF8.GetBytes(LocalIcePassword));
-
-                if (!result)
+                if (_closed)
                 {
-                    // Send STUN error response.
-                    logger.LogWarning($"ICE RTP channel STUN binding request from {remoteEndPoint} failed an integrity check, rejecting.");
+                    return;
+                }
+
+                if (_policy == RTCIceTransportPolicy.relay && !wasRelayed)
+                {
+                    // If the policy is "relay only" then direct binding requests are not accepted.
+                    logger.LogWarning($"ICE RTP channel rejecting non-relayed STUN binding request from {remoteEndPoint}.");
+
                     STUNMessage stunErrResponse = new STUNMessage(STUNMessageTypesEnum.BindingErrorResponse);
                     stunErrResponse.Header.TransactionId = bindingRequest.Header.TransactionId;
-                    Send(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false));
+                    await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false));
 
                     OnStunMessageSent?.Invoke(stunErrResponse, remoteEndPoint, false);
                 }
                 else
                 {
-                    ChecklistEntry matchingChecklistEntry = null;
+                    bool result = bindingRequest.CheckIntegrity(Encoding.UTF8.GetBytes(LocalIcePassword));
 
-                    // Find the checklist entry for this remote candidate and update its status.
-                    lock (_checklist)
+                    if (!result)
                     {
-                        // The matching checklist entry is chosen as:
-                        // - The entry that has a remote candidate with an end point that matches the endpoint this STUN request came from,
-                        // - And if the STUN request was relayed through a TURN server then only match is the checklist local candidate is 
-                        //   also a relay type. It is possible for the same remote end point to send STUN requests directly and via a TURN server.
-                        matchingChecklistEntry = _checklist.Where(x => x.RemoteCandidate.IsEquivalentEndPoint(RTCIceProtocol.udp, remoteEndPoint) &&
-                         (!wasRelayed || x.LocalCandidate.type == RTCIceCandidateType.relay)
-                         ).FirstOrDefault();
-                    }
-
-                    if (matchingChecklistEntry == null &&
-                        (_remoteCandidates == null || !_remoteCandidates.Any(x => x.IsEquivalentEndPoint(RTCIceProtocol.udp, remoteEndPoint))))
-                    {
-                        // This STUN request has come from a socket not in the remote ICE candidates list. 
-                        // Add a new remote peer reflexive candidate. 
-                        RTCIceCandidate peerRflxCandidate = new RTCIceCandidate(new RTCIceCandidateInit());
-                        peerRflxCandidate.SetAddressProperties(RTCIceProtocol.udp, remoteEndPoint.Address, (ushort)remoteEndPoint.Port, RTCIceCandidateType.prflx, null, 0);
-                        peerRflxCandidate.SetDestinationEndPoint(remoteEndPoint);
-                        logger.LogDebug($"Adding peer reflex ICE candidate for {remoteEndPoint}.");
-                        _remoteCandidates.Add(peerRflxCandidate);
-
-                        // Add a new entry to the check list for the new peer reflexive candidate.
-                        ChecklistEntry entry = new ChecklistEntry(wasRelayed ? _relayChecklistCandidate : _localChecklistCandidate,
-                            peerRflxCandidate, IsController);
-                        entry.State = ChecklistEntryState.Waiting;
-
-                        if (wasRelayed)
-                        {
-                            // No need to send a TURN permissions request given this request was already successfully relayed.
-                            entry.TurnPermissionsRequestSent = 1;
-                            entry.TurnPermissionsResponseAt = DateTime.Now;
-                        }
-
-                        lock (_checklist)
-                        {
-                            AddChecklistEntry(entry);
-                        }
-
-                        matchingChecklistEntry = entry;
-                    }
-
-                    if (matchingChecklistEntry == null)
-                    {
-                        logger.LogWarning("ICE RTP channel STUN request matched a remote candidate but NOT a checklist entry.");
+                        // Send STUN error response.
+                        logger.LogWarning($"ICE RTP channel STUN binding request from {remoteEndPoint} failed an integrity check, rejecting.");
                         STUNMessage stunErrResponse = new STUNMessage(STUNMessageTypesEnum.BindingErrorResponse);
                         stunErrResponse.Header.TransactionId = bindingRequest.Header.TransactionId;
-                        Send(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false));
+                        await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false));
 
                         OnStunMessageSent?.Invoke(stunErrResponse, remoteEndPoint, false);
                     }
                     else
                     {
-                        // The UseCandidate attribute is only meant to be set by the "Controller" peer. This implementation
-                        // will accept it irrespective of the peer roles. If the remote peer wants us to use a certain remote
-                        // end point then so be it.
-                        if (bindingRequest.Attributes.Any(x => x.AttributeType == STUNAttributeTypesEnum.UseCandidate))
+                        ChecklistEntry matchingChecklistEntry = null;
+
+                        // Find the checklist entry for this remote candidate and update its status.
+                        lock (_checklist)
                         {
-                            if (IceConnectionState != RTCIceConnectionState.connected)
-                            {
-                                // If we are the "controlled" agent and get a "use candidate" attribute that sets the matching candidate as nominated 
-                                // as per https://tools.ietf.org/html/rfc8445#section-7.3.1.5.
-                                logger.LogDebug($"ICE RTP channel remote peer nominated entry from binding request: {matchingChecklistEntry.RemoteCandidate.ToShortString()}.");
-                                SetNominatedEntry(matchingChecklistEntry);
-                            }
-                            else if (matchingChecklistEntry.RemoteCandidate.ToString() != NominatedEntry.RemoteCandidate.ToString())
-                            {
-                                // The remote peer is changing the nominated candidate.
-                                logger.LogDebug($"ICE RTP channel remote peer nominated a new candidate: {matchingChecklistEntry.RemoteCandidate.ToShortString()}.");
-                                SetNominatedEntry(matchingChecklistEntry);
-                            }
+                            matchingChecklistEntry = _checklist.Where(x => x.RemoteCandidate.IsEquivalentEndPoint(RTCIceProtocol.udp, remoteEndPoint) &&
+                                (!wasRelayed || x.LocalCandidate.type == RTCIceCandidateType.relay)
+                                ).FirstOrDefault();
                         }
 
-                        matchingChecklistEntry.LastBindingRequestReceivedAt = DateTime.Now;
-
-                        STUNMessage stunResponse = new STUNMessage(STUNMessageTypesEnum.BindingSuccessResponse);
-                        stunResponse.Header.TransactionId = bindingRequest.Header.TransactionId;
-                        stunResponse.AddXORMappedAddressAttribute(remoteEndPoint.Address, remoteEndPoint.Port);
-                        byte[] stunRespBytes = stunResponse.ToByteBufferStringKey(LocalIcePassword, true);
-
-                        if (wasRelayed)
+                        if (matchingChecklistEntry == null &&
+                            (_remoteCandidates == null || !_remoteCandidates.Any(x => x.IsEquivalentEndPoint(RTCIceProtocol.udp, remoteEndPoint))))
                         {
-                            var protocol = matchingChecklistEntry.LocalCandidate.IceServer.Protocol;
-                            SendRelay(protocol, remoteEndPoint, stunRespBytes, matchingChecklistEntry.LocalCandidate.IceServer.ServerEndPoint, matchingChecklistEntry.LocalCandidate.IceServer, onFailure: null);
-                            OnStunMessageSent?.Invoke(stunResponse, remoteEndPoint, true);
+                            // This STUN request has come from a socket not in the remote ICE candidates list.  
+                            // Add a new remote peer reflexive candidate.  
+                            RTCIceCandidate peerRflxCandidate = new RTCIceCandidate(new RTCIceCandidateInit());
+                            peerRflxCandidate.SetAddressProperties(RTCIceProtocol.udp, remoteEndPoint.Address, (ushort)remoteEndPoint.Port, RTCIceCandidateType.prflx, null, 0);
+                            peerRflxCandidate.SetDestinationEndPoint(remoteEndPoint);
+                            logger.LogDebug($"Adding peer reflex ICE candidate for {remoteEndPoint}.");
+                            _remoteCandidates.Add(peerRflxCandidate);
+
+                            // Add a new entry to the check list for the new peer reflexive candidate.
+                            ChecklistEntry entry = new ChecklistEntry(wasRelayed ? _relayChecklistCandidate : _localChecklistCandidate,
+                                    peerRflxCandidate, IsController);
+                            entry.State = ChecklistEntryState.Waiting;
+
+                            if (wasRelayed)
+                            {
+                                // No need to send a TURN permissions request given this request was already successfully relayed.
+                                entry.TurnPermissionsRequestSent = 1;
+                                entry.TurnPermissionsResponseAt = DateTime.Now;
+                            }
+
+                            lock (_checklist)
+                            {
+                                AddChecklistEntry(entry);
+                            }
+
+                            matchingChecklistEntry = entry;
+                        }
+
+                        if (matchingChecklistEntry == null)
+                        {
+                            logger.LogWarning("ICE RTP channel STUN request matched a remote candidate but NOT a checklist entry.");
+                            STUNMessage stunErrResponse = new STUNMessage(STUNMessageTypesEnum.BindingErrorResponse);
+                            stunErrResponse.Header.TransactionId = bindingRequest.Header.TransactionId;
+                            await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunErrResponse.ToByteBuffer(null, false));
+
+                            OnStunMessageSent?.Invoke(stunErrResponse, remoteEndPoint, false);
                         }
                         else
                         {
-                            Send(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunRespBytes);
-                            OnStunMessageSent?.Invoke(stunResponse, remoteEndPoint, false);
+                            if (bindingRequest.Attributes.Any(x => x.AttributeType == STUNAttributeTypesEnum.UseCandidate))
+                            {
+                                if (IceConnectionState != RTCIceConnectionState.connected)
+                                {
+                                    logger.LogDebug($"ICE RTP channel remote peer nominated entry from binding request: {matchingChecklistEntry.RemoteCandidate.ToShortString()}.");
+                                    SetNominatedEntry(matchingChecklistEntry);
+                                }
+                                else if (matchingChecklistEntry.RemoteCandidate.ToString() != NominatedEntry.RemoteCandidate.ToString())
+                                {
+                                    logger.LogDebug($"ICE RTP channel remote peer nominated a new candidate: {matchingChecklistEntry.RemoteCandidate.ToShortString()}.");
+                                    SetNominatedEntry(matchingChecklistEntry);
+                                }
+                            }
+
+                            matchingChecklistEntry.LastBindingRequestReceivedAt = DateTime.Now;
+
+                            STUNMessage stunResponse = new STUNMessage(STUNMessageTypesEnum.BindingSuccessResponse);
+                            stunResponse.Header.TransactionId = bindingRequest.Header.TransactionId;
+                            stunResponse.AddXORMappedAddressAttribute(remoteEndPoint.Address, remoteEndPoint.Port);
+                            byte[] stunRespBytes = stunResponse.ToByteBufferStringKey(LocalIcePassword, true);
+
+                            if (wasRelayed)
+                            {
+                                var protocol = matchingChecklistEntry.LocalCandidate.IceServer.Protocol;
+                                await SendRelayAsync(protocol, remoteEndPoint, stunRespBytes, matchingChecklistEntry.LocalCandidate.IceServer.ServerEndPoint, matchingChecklistEntry.LocalCandidate.IceServer, onFailure: null);
+                                OnStunMessageSent?.Invoke(stunResponse, remoteEndPoint, true);
+                            }
+                            else
+                            {
+                                await SendAsync(RTPChannelSocketsEnum.RTP, remoteEndPoint, stunRespBytes);
+                                OnStunMessageSent?.Invoke(stunResponse, remoteEndPoint, false);
+                            }
                         }
                     }
                 }
+            }
+            catch (Exception excp)
+            {
+                logger.LogError($"Exception in GotStunBindingRequestAsync. {excp}");
             }
         }
 
@@ -2295,7 +2320,7 @@ namespace SIPSorcery.Net
         /// <param name="iceServer">The ICE server to send the request to.</param>
         /// <returns>The result of the send attempt. Note this is the return code from the
         /// socket send call and not the result code from the STUN response.</returns>
-        private SocketError SendStunBindingRequest(IceServer iceServer)
+        private async Task<SocketError> SendStunBindingRequestAsync(IceServer iceServer)
         {
             iceServer.OutstandingRequestsSent += 1;
             iceServer.LastRequestSentAt = DateTime.Now;
@@ -2315,9 +2340,10 @@ namespace SIPSorcery.Net
                 stunReqBytes = stunRequest.ToByteBuffer(null, false);
             }
 
-            var sendResult = iceServer.Protocol == ProtocolType.Tcp ?
-                                SendOverTCP(iceServer, stunReqBytes) :
-                                base.Send(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, stunReqBytes, OnBindingFailure);
+            // Await the result of the appropriate async send method.
+            var sendResult = await (iceServer.Protocol == ProtocolType.Tcp ?
+                SendOverTCPAsync(iceServer, stunReqBytes) :
+                base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, stunReqBytes, OnBindingFailure));
 
             if (sendResult != SocketError.Success)
             {
@@ -2337,18 +2363,14 @@ namespace SIPSorcery.Net
         /// </summary>
         /// <param name="iceServer">The TURN server to send the request to.</param>
         /// <returns>The result from the socket send (not the response code from the TURN server).</returns>
-        private SocketError SendTurnAllocateRequest(IceServer iceServer)
+        private async Task<SocketError> SendTurnAllocateRequestAsync(IceServer iceServer)
         {
             iceServer.OutstandingRequestsSent += 1;
             iceServer.LastRequestSentAt = DateTime.Now;
 
             STUNMessage allocateRequest = new STUNMessage(STUNMessageTypesEnum.Allocate);
             allocateRequest.Header.TransactionId = Encoding.ASCII.GetBytes(iceServer.TransactionID);
-            //allocateRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.Lifetime, 3600));
             allocateRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.RequestedTransport, STUNAttributeConstants.UdpTransportType));
-            /*iceServer.Protocol == ProtocolType.Tcp?
-            STUNAttributeConstants.TcpTransportType :
-            STUNAttributeConstants.UdpTransportType));*/
 
             allocateRequest.Attributes.Add(
                 new STUNAttribute(STUNAttributeTypesEnum.RequestedAddressFamily,
@@ -2366,9 +2388,10 @@ namespace SIPSorcery.Net
                 allocateReqBytes = allocateRequest.ToByteBuffer(null, false);
             }
 
-            var sendResult = iceServer.Protocol == ProtocolType.Tcp ?
-                                SendOverTCP(iceServer, allocateReqBytes) :
-                                base.Send(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, allocateReqBytes, OnBindingFailure);
+            // Await the result of the appropriate async send method.
+            var sendResult = await (iceServer.Protocol == ProtocolType.Tcp ?
+                SendOverTCPAsync(iceServer, allocateReqBytes) :
+                base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, allocateReqBytes, OnBindingFailure));
 
             if (sendResult != SocketError.Success)
             {
@@ -2388,14 +2411,13 @@ namespace SIPSorcery.Net
         /// </summary>
         /// <param name="iceServer">The TURN server to send the request to.</param>
         /// <returns>The result from the socket send (not the response code from the TURN server).</returns>
-        private SocketError SendTurnRefreshRequest(IceServer iceServer)
+        private async Task<SocketError> SendTurnRefreshRequestAsync(IceServer iceServer)
         {
             iceServer.OutstandingRequestsSent += 1;
             iceServer.LastRequestSentAt = DateTime.Now;
 
             STUNMessage allocateRequest = new STUNMessage(STUNMessageTypesEnum.Refresh);
             allocateRequest.Header.TransactionId = Encoding.ASCII.GetBytes(iceServer.TransactionID);
-            //allocateRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.Lifetime, 3600));
             allocateRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.Lifetime, ALLOCATION_TIME_TO_EXPIRY_VALUE));
 
             allocateRequest.Attributes.Add(
@@ -2414,9 +2436,10 @@ namespace SIPSorcery.Net
                 allocateReqBytes = allocateRequest.ToByteBuffer(null, false);
             }
 
-            var sendResult = iceServer.Protocol == ProtocolType.Tcp ?
-                                SendOverTCP(iceServer, allocateReqBytes) :
-                                base.Send(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, allocateReqBytes);
+            // Await the result of the appropriate async send method.
+            var sendResult = await (iceServer.Protocol == ProtocolType.Tcp ?
+                SendOverTCPAsync(iceServer, allocateReqBytes) :
+                base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, allocateReqBytes));
 
             if (sendResult != SocketError.Success)
             {
@@ -2439,7 +2462,10 @@ namespace SIPSorcery.Net
         /// <param name="iceServer">The ICE server to send the request to.</param>
         /// <param name="peerEndPoint">The peer end point to request the channel bind for.</param>
         /// <returns>The result from the socket send (not the response code from the TURN server).</returns>
-        private SocketError SendTurnCreatePermissionsRequest(string transactionID, IceServer iceServer, IPEndPoint peerEndPoint)
+        private async Task<SocketError> SendTurnCreatePermissionsRequestAsync(
+            string transactionID,
+            IceServer iceServer,
+            IPEndPoint peerEndPoint)
         {
             STUNMessage permissionsRequest = new STUNMessage(STUNMessageTypesEnum.CreatePermission);
             permissionsRequest.Header.TransactionId = Encoding.ASCII.GetBytes(transactionID);
@@ -2456,9 +2482,10 @@ namespace SIPSorcery.Net
                 createPermissionReqBytes = permissionsRequest.ToByteBuffer(null, false);
             }
 
-            var sendResult = iceServer.Protocol == ProtocolType.Tcp ?
-                                SendOverTCP(iceServer, createPermissionReqBytes) :
-                                base.Send(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, createPermissionReqBytes);
+            // Await the result of the appropriate async send method using a conditional expression.
+            var sendResult = await (iceServer.Protocol == ProtocolType.Tcp ?
+                SendOverTCPAsync(iceServer, createPermissionReqBytes) :
+                base.SendAsync(RTPChannelSocketsEnum.RTP, iceServer.ServerEndPoint, createPermissionReqBytes));
 
             if (sendResult != SocketError.Success)
             {
@@ -2473,85 +2500,81 @@ namespace SIPSorcery.Net
             return sendResult;
         }
 
-        protected virtual SocketError SendOverTCP(IceServer iceServer, byte[] buffer)
+        protected virtual async Task<SocketError> SendOverTCPAsync(IceServer iceServer, ReadOnlyMemory<byte> buffer)
         {
             IPEndPoint dstEndPoint = iceServer?.ServerEndPoint;
+
+            // --- Initial validation checks (unchanged) ---
             if (IsClosed)
             {
                 return SocketError.Disconnecting;
             }
-            else if (dstEndPoint == null)
+            if (dstEndPoint == null)
             {
                 throw new ArgumentException("dstEndPoint", "An empty destination was specified to Send in RTPChannel.");
             }
-            else if (buffer == null || buffer.Length == 0)
+            if (buffer.IsEmpty)
             {
                 throw new ArgumentException("buffer", "The buffer must be set and non empty for Send in RTPChannel.");
             }
-            else if (IPAddress.Any.Equals(dstEndPoint.Address) || IPAddress.IPv6Any.Equals(dstEndPoint.Address))
+            if (IPAddress.Any.Equals(dstEndPoint.Address) || IPAddress.IPv6Any.Equals(dstEndPoint.Address))
             {
                 logger.LogWarning($"The destination address for Send in RTPChannel cannot be {dstEndPoint.Address}.");
                 return SocketError.DestinationAddressRequired;
             }
-            else
+
+            try
             {
-                try
+                RtpTcpSocketByUri.TryGetValue(iceServer?._uri, out Socket sendSocket);
+                if (sendSocket == null)
                 {
-                    //Connect to destination
-                    RtpTcpSocketByUri.TryGetValue(iceServer?._uri, out Socket sendSocket);
-                    //LastRtpDestination = dstEndPoint;
-
-                    if (sendSocket == null)
-                    {
-                        return SocketError.Fault;
-                    }
-
-                    //Prevent Send to IPV4 while socket is IPV6 (Mono Error)
-                    if (dstEndPoint.AddressFamily == AddressFamily.InterNetwork && sendSocket.AddressFamily != dstEndPoint.AddressFamily)
-                    {
-                        dstEndPoint = new IPEndPoint(dstEndPoint.Address.MapToIPv6(), dstEndPoint.Port);
-                    }
-
-                    Func<IPEndPoint, IPEndPoint, bool> equals = (IPEndPoint e1, IPEndPoint e2) =>
-                    {
-                        return e1.Port == e2.Port && e1.Address.Equals(e2.Address);
-                    };
-
-                    if (!sendSocket.Connected || !(sendSocket.RemoteEndPoint is IPEndPoint) || !equals(sendSocket.RemoteEndPoint as IPEndPoint, dstEndPoint))
-                    {
-                        if (sendSocket.Connected)
-                        {
-                            logger.LogDebug($"SendOverTCP request disconnect.");
-                            sendSocket.Disconnect(true);
-                        }
-                        sendSocket.Connect(dstEndPoint);
-
-                        logger.LogDebug($"SendOverTCP status: {sendSocket.Connected} endpoint: {dstEndPoint}");
-                    }
-
-                    //Fix ReceiveFrom logic if any previous exception happens
-                    m_rtpTcpReceiverByUri.TryGetValue(iceServer?._uri, out IceTcpReceiver rtpTcpReceiver);
-                    if (rtpTcpReceiver != null && !rtpTcpReceiver.IsRunningReceive && !rtpTcpReceiver.IsClosed)
-                    {
-                        rtpTcpReceiver.BeginReceiveFrom();
-                    }
-
-                    sendSocket.BeginSendTo(buffer, 0, buffer.Length, SocketFlags.None, dstEndPoint, EndSendToTCP, sendSocket);
-                    return SocketError.Success;
-                }
-                catch (ObjectDisposedException) // Thrown when socket is closed. Can be safely ignored.
-                {
-                    return SocketError.Disconnecting;
-                }
-                catch (SocketException sockExcp)
-                {
-                    return sockExcp.SocketErrorCode;
-                }
-                catch (Exception excp)
-                {
-                    logger.LogError($"Exception RTPIceChannel.SendOverTCP. {excp}");
                     return SocketError.Fault;
                 }
+
+                // Prevent Send to IPV4 while socket is IPV6 (Mono Error)
+                if (dstEndPoint.AddressFamily == AddressFamily.InterNetwork && sendSocket.AddressFamily != dstEndPoint.AddressFamily)
+                {
+                    dstEndPoint = new IPEndPoint(dstEndPoint.Address.MapToIPv6(), dstEndPoint.Port);
+                }
+
+                // --- Non-blocking connection logic ---
+                if (!sendSocket.Connected || !(sendSocket.RemoteEndPoint is IPEndPoint remoteEndPoint) || !remoteEndPoint.Equals(dstEndPoint))
+                {
+                    if (sendSocket.Connected)
+                    {
+                        logger.LogDebug($"SendOverTCPAsync requesting disconnect.");
+                        sendSocket.Disconnect(true); // Disconnect is synchronous, which is fine.
+                    }
+
+                    // Use the non-blocking async version of Connect.
+                    await sendSocket.ConnectAsync(dstEndPoint);
+                    logger.LogDebug($"SendOverTCPAsync status: {sendSocket.Connected} endpoint: {dstEndPoint}");
+                }
+
+                m_rtpTcpReceiverByUri.TryGetValue(iceServer?._uri, out IceTcpReceiver rtpTcpReceiver);
+                if (rtpTcpReceiver != null && !rtpTcpReceiver.IsRunningReceive && !rtpTcpReceiver.IsClosed)
+                {
+                    rtpTcpReceiver.BeginReceiveFrom();
+                }
+
+                // --- Non-blocking send logic ---
+                // Replace BeginSendTo/callback with a single awaitable call.
+                await sendSocket.SendAsync(buffer, SocketFlags.None);
+
+                return SocketError.Success;
+            }
+            catch (ObjectDisposedException) // Thrown when socket is closed.
+            {
+                return SocketError.Disconnecting;
+            }
+            catch (SocketException sockExcp)
+            {
+                return sockExcp.SocketErrorCode;
+            }
+            catch (Exception excp)
+            {
+                logger.LogError($"Exception RTPIceChannel.SendOverTCPAsync. {excp}");
+                return SocketError.Fault;
             }
         }
 
@@ -2680,16 +2703,27 @@ namespace SIPSorcery.Net
         /// <param name="buffer">The data to send to the peer.</param>
         /// <param name="relayEndPoint">The TURN server end point to send the relayed request to.</param>
         /// <returns></returns>
-        private SocketError SendRelay(ProtocolType protocol, IPEndPoint dstEndPoint, ReadOnlySpan<byte> buffer, IPEndPoint relayEndPoint, IceServer iceServer, Func<Exception, bool>? onFailure)
-        {
+        private async Task<SocketError> SendRelayAsync(
+         ProtocolType protocol,
+         IPEndPoint dstEndPoint,
+         ReadOnlyMemory<byte> buffer,
+         IPEndPoint relayEndPoint,
+         IceServer iceServer,
+         Func<Exception, bool>? onFailure)
+            {
             STUNMessage sendReq = new STUNMessage(STUNMessageTypesEnum.SendIndication);
             sendReq.AddXORPeerAddressAttribute(dstEndPoint.Address, dstEndPoint.Port);
+
+            // Note: This .ToArray() still creates an allocation. If you control the STUNAttribute
+            // class, consider modifying it to accept a ReadOnlyMemory<byte> to avoid this.
             sendReq.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.Data, buffer.ToArray()));
 
             var request = sendReq.ToByteBuffer(null, false);
+
+            // Await the result of the appropriate async send method.
             var sendResult = protocol == ProtocolType.Tcp ?
-                SendOverTCP(iceServer, request) :
-                base.Send(RTPChannelSocketsEnum.RTP, relayEndPoint, request, onFailure);
+                await SendOverTCPAsync(iceServer, request) :
+                await base.SendAsync(RTPChannelSocketsEnum.RTP, relayEndPoint, request, onFailure);
 
             if (sendResult != SocketError.Success)
             {
@@ -2757,7 +2791,11 @@ namespace SIPSorcery.Net
         /// <param name="buffer">The data to send.</param>
         /// <returns>The result of initiating the send. This result does not reflect anything about
         /// whether the remote party received the packet or not.</returns>
-        public override SocketError Send(RTPChannelSocketsEnum sendOn, IPEndPoint dstEndPoint, ReadOnlySpan<byte> buffer, Func<Exception, bool>? onFailure = null)
+        public override async Task<SocketError> SendAsync(
+            RTPChannelSocketsEnum sendOn,
+            IPEndPoint dstEndPoint,
+            ReadOnlyMemory<byte> buffer,
+            Func<Exception, bool>? onFailure = null)
         {
             if (NominatedEntry != null && NominatedEntry.LocalCandidate.type == RTCIceCandidateType.relay &&
                 NominatedEntry.LocalCandidate.IceServer != null &&
@@ -2767,11 +2805,14 @@ namespace SIPSorcery.Net
                 // A TURN relay channel is being used to communicate with the remote peer.
                 var protocol = NominatedEntry.LocalCandidate.IceServer.Protocol;
                 var serverEndPoint = NominatedEntry.LocalCandidate.IceServer.ServerEndPoint;
-                return SendRelay(protocol, dstEndPoint, buffer, serverEndPoint, NominatedEntry.LocalCandidate.IceServer, onFailure);
+
+                // Now calling the async version of SendRelay
+                return await SendRelayAsync(protocol, dstEndPoint, buffer, serverEndPoint, NominatedEntry.LocalCandidate.IceServer, onFailure);
             }
             else
             {
-                return base.Send(sendOn, dstEndPoint, buffer, onFailure);
+                // Now calling the async base method
+                return await base.SendAsync(sendOn, dstEndPoint, buffer, onFailure);
             }
         }
     }

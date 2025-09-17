@@ -526,112 +526,83 @@ namespace SIPSorcery.Net
         /// <param name="onFailure">If supplied and given an exception returns <c>true</c>, disables further error processing.</param>
         /// <returns>The result of initiating the send. This result does not reflect anything about
         /// whether the remote party received the packet or not.</returns>
-        public virtual SocketError Send(RTPChannelSocketsEnum sendOn, IPEndPoint dstEndPoint, ReadOnlySpan<byte> buffer, Func<Exception, bool>? onFailure = null)
+        public virtual async Task<SocketError> SendAsync(
+    RTPChannelSocketsEnum sendOn,
+    IPEndPoint dstEndPoint,
+    ReadOnlyMemory<byte> buffer,
+    Func<Exception, bool>? onFailure = null)
         {
+            // --- Initial validation checks (unchanged) ---
             if (m_isClosed)
             {
                 return SocketError.Disconnecting;
             }
-            else if (dstEndPoint == null)
+            if (dstEndPoint == null)
             {
                 throw new ArgumentException("dstEndPoint", "An empty destination was specified to Send in RTPChannel.");
             }
-            else if (buffer == null || buffer.Length == 0)
+            if (buffer.IsEmpty)
             {
                 throw new ArgumentException("buffer", "The buffer must be set and non empty for Send in RTPChannel.");
             }
-            else if (IPAddress.Any.Equals(dstEndPoint.Address) || IPAddress.IPv6Any.Equals(dstEndPoint.Address))
+            if (IPAddress.Any.Equals(dstEndPoint.Address) || IPAddress.IPv6Any.Equals(dstEndPoint.Address))
             {
                 logger.LogWarning($"The destination address for Send in RTPChannel cannot be {dstEndPoint.Address}.");
                 return SocketError.DestinationAddressRequired;
             }
-            else
+
+            // --- Main logic within a single try/catch block ---
+            Socket sendSocket = null; // Declared here to be accessible in catch blocks if needed
+            try
             {
-                try
+                sendSocket = RtpSocket;
+                if (sendOn == RTPChannelSocketsEnum.Control)
                 {
-                    Socket sendSocket = RtpSocket;
-                    if (sendOn == RTPChannelSocketsEnum.Control)
+                    LastControlDestination = dstEndPoint;
+                    if (m_controlSocket == null)
                     {
-                        LastControlDestination = dstEndPoint;
-                        if (m_controlSocket == null)
-                        {
-                            throw new ApplicationException("RTPChannel was asked to send on the control socket but none exists.");
-                        }
-                        else
-                        {
-                            sendSocket = m_controlSocket;
-                        }
+                        throw new ApplicationException("RTPChannel was asked to send on the control socket but none exists.");
                     }
-                    else
-                    {
-                        LastRtpDestination = dstEndPoint;
-                    }
+                    sendSocket = m_controlSocket;
+                }
+                else
+                {
+                    LastRtpDestination = dstEndPoint;
+                }
 
-                    //Prevent Send to IPV4 while socket is IPV6 (Mono Error)
-                    if (isMono && dstEndPoint.AddressFamily == AddressFamily.InterNetwork && sendSocket.AddressFamily != dstEndPoint.AddressFamily)
-                    {
-                        dstEndPoint = new IPEndPoint(dstEndPoint.Address.MapToIPv6(), dstEndPoint.Port);
-                    }
+                // Prevent Send to IPV4 while socket is IPV6 (Mono Error)
+                if (isMono && dstEndPoint.AddressFamily == AddressFamily.InterNetwork && sendSocket.AddressFamily != dstEndPoint.AddressFamily)
+                {
+                    dstEndPoint = new IPEndPoint(dstEndPoint.Address.MapToIPv6(), dstEndPoint.Port);
+                }
 
-                    //Fix ReceiveFrom logic if any previous exception happens
-                    if (!m_rtpReceiver.IsRunningReceive && !m_rtpReceiver.IsClosed)
-                    {
-                        m_rtpReceiver.BeginReceiveFrom();
-                    }
+                // Fix ReceiveFrom logic if any previous exception happens
+                if (!m_rtpReceiver.IsRunningReceive && !m_rtpReceiver.IsClosed)
+                {
+                    m_rtpReceiver.BeginReceiveFrom();
+                }
 
-                    var tmp = ArrayPool<byte>.Shared.Rent(buffer.Length);
-                    buffer.CopyTo(tmp);
-                    ValueTask<int> send;
-                    try
-                    {
-                        send = sendSocket.SendToAsync(tmp.AsMemory(0, buffer.Length), SocketFlags.None, dstEndPoint);
-                    }
-                    catch
-                    {
-                        ArrayPool<byte>.Shared.Return(tmp);
-                        throw;
-                    }
-                    if (send.IsCompleted)
-                    {
-                        try
-                        {
-                            send.GetAwaiter().GetResult();
-                        }
-                        catch (Exception excp)
-                        {
-                            EndSendTo(excp, dstEndPoint, sendSocket, onFailure);
-                        }
-                        finally
-                        {
-                            ArrayPool<byte>.Shared.Return(tmp);
-                        }
-                    }
-                    else
-                    {
-                        send.AsTask().ContinueWith(t =>
-                        {
-                            ArrayPool<byte>.Shared.Return(tmp);
-                            if (t.IsFaulted)
-                            {
-                                EndSendTo(t.Exception, dstEndPoint, sendSocket, onFailure);
-                            }
-                        });
-                    }
-                    return SocketError.Success;
-                }
-                catch (ObjectDisposedException) // Thrown when socket is closed. Can be safely ignored.
-                {
-                    return SocketError.Disconnecting;
-                }
-                catch (SocketException sockExcp)
-                {
-                    return sockExcp.SocketErrorCode;
-                }
-                catch (Exception excp)
-                {
-                    logger.LogError($"Exception RTPChannel.Send. {excp}");
-                    return SocketError.Fault;
-                }
+                // Await the async operation directly. THIS IS THE KEY CHANGE.
+                // It is non-blocking and frees the calling thread.
+                await sendSocket.SendToAsync(buffer, SocketFlags.None, dstEndPoint);
+
+                return SocketError.Success;
+            }
+            catch (ObjectDisposedException) // Thrown when socket is closed. Can be safely ignored.
+            {
+                return SocketError.Disconnecting;
+            }
+            catch (SocketException sockExcp)
+            {
+                // Your existing failure logic can be called here
+                if (sendSocket != null) EndSendTo(sockExcp, dstEndPoint, sendSocket, onFailure);
+                return sockExcp.SocketErrorCode;
+            }
+            catch (Exception excp)
+            {
+                logger.LogError($"Exception RTPChannel.SendAsync. {excp}"); // Note: updated log message
+                if (sendSocket != null) EndSendTo(excp, dstEndPoint, sendSocket, onFailure);
+                return SocketError.Fault;
             }
         }
 

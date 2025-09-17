@@ -19,6 +19,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.net.RTP;
 using SIPSorcery.net.RTP.Packetisation;
@@ -86,7 +87,7 @@ namespace SIPSorcery.Net
         /// <param name="jpegQuality">The encoder quality of the JPEG image.</param>
         /// <param name="jpegWidth">The width of the JPEG image.</param>
         /// <param name="jpegHeight">The height of the JPEG image.</param>
-        public void SendJpegFrame(uint duration, int payloadTypeID, byte[] jpegBytes, int jpegQuality, int jpegWidth, int jpegHeight)
+        public async Task SendJpegFrame(uint duration, int payloadTypeID, byte[] jpegBytes, int jpegQuality, int jpegWidth, int jpegHeight)
         {
             if (CheckIfCanSendRtpRaw())
             {
@@ -104,7 +105,7 @@ namespace SIPSorcery.Net
 
                         int markerBit = ((index + 1) * RTPSession.RTP_MAX_PAYLOAD < jpegBytes.Length) ? 0 : 1;
 
-                        SendRtpRaw(packetPayload.ToArray(), LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                        await SendRtpRawAsync(packetPayload.ToArray(), LocalTrack.Timestamp, markerBit, payloadTypeID, true);
                     }
 
                     LocalTrack.Timestamp += duration;
@@ -119,7 +120,7 @@ namespace SIPSorcery.Net
         /// <summary>
         /// Sends an H.264 frame, represented by an Access Unit, to the remote party.
         /// </summary>
-        public void SendH264Frame(uint duration, int payloadTypeID, ReadOnlyMemory<byte> accessUnit)
+        public async Task SendH264FrameAsync(uint duration, int payloadTypeID, ReadOnlyMemory<byte> accessUnit)
         {
             if (CheckIfCanSendRtpRaw())
             {
@@ -128,7 +129,7 @@ namespace SIPSorcery.Net
                 foreach (var nalInfo in H264Packetiser.ParseNals(accessUnit))
                 {
                     // .Span is used to get the ReadOnlySpan<byte> from the ReadOnlyMemory<byte>
-                    SendH26XNal(duration, payloadTypeID, nalInfo.NAL.Span, nalInfo.IsLast);
+                    await SendH26XNalAsync(duration, payloadTypeID, nalInfo.NAL, nalInfo.IsLast);
                 }
             }
         }
@@ -136,7 +137,7 @@ namespace SIPSorcery.Net
         /// <summary>
         /// Sends a single H.264 or H.265 NAL to the remote party.
         /// </summary>
-        private void SendH26XNal(uint duration, int payloadTypeID, ReadOnlySpan<byte> nal, bool isLastNal, bool is265 = false)
+        private async Task SendH26XNalAsync(uint duration, int payloadTypeID, ReadOnlyMemory<byte> nal, bool isLastNal, bool is265 = false)
         {
             if (nal.IsEmpty)
             {
@@ -145,25 +146,20 @@ namespace SIPSorcery.Net
 
             var naluHeaderSize = is265 ? 2 : 1;
 
-            // A NAL fits into a single RTP packet (formerly STAP-A, now just a single NAL unit packet).
+            // A NAL fits into a single RTP packet.
             if (nal.Length <= RTPSession.RTP_MAX_PAYLOAD)
             {
-                // Send the NAL as a single NAL unit packet.
-                // .ToArray() creates the necessary byte[] for the payload.
                 byte[] payload = nal.ToArray();
                 int markerBit = isLastNal ? 1 : 0;
 
                 SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
-                SendRtpRaw(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
             }
             // The NAL must be fragmented across multiple RTP packets.
             else
             {
-                // Get the original NALU header. For H.264, it's the first byte. For H.265, the first two.
-                ReadOnlySpan<byte> naluHeader = nal.Slice(0, naluHeaderSize);
-                // The rest of the NAL is the payload to be fragmented. This slice is allocation-free.
+                ReadOnlyMemory<byte> naluHeader = nal.Slice(0, naluHeaderSize);
                 var nalPayloadToFragment = nal.Slice(naluHeaderSize);
-
                 bool isFirstPacket = true;
 
                 while (!nalPayloadToFragment.IsEmpty)
@@ -175,20 +171,20 @@ namespace SIPSorcery.Net
                     bool isFinalPacket = nalPayloadToFragment.IsEmpty;
                     int markerBit = (isLastNal && isFinalPacket) ? 1 : 0;
 
-                    // Generate the FU (Fragmentation Unit) header.
                     byte[] rtpHdr = is265 ?
                         H265Packetiser.GetH265RtpHeader(naluHeader.ToArray(), isFirstPacket, isFinalPacket) :
-                        H264Packetiser.GetH264RtpHeader(naluHeader[0], isFirstPacket, isFinalPacket);
+                        H264Packetiser.GetH264RtpHeader(naluHeader.Span[0], isFirstPacket, isFinalPacket);
 
-                    // Create the final payload: [FU Header][NAL Payload Slice]
                     byte[] payload = new byte[payloadLength + rtpHdr.Length];
                     rtpHdr.CopyTo(payload, 0);
-                    currentSlice.CopyTo(payload.AsSpan(rtpHdr.Length));
+                    currentSlice.Span.CopyTo(payload.AsSpan(rtpHdr.Length));
 
                     isFirstPacket = false;
 
                     SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
-                    SendRtpRaw(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+
+                    // This was the last blocking call - now corrected.
+                    await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
                 }
             }
 
@@ -198,7 +194,7 @@ namespace SIPSorcery.Net
             }
         }
 
-        public void SendH265Frame(uint durationRtpUnits, int payloadID, byte[] sample)
+        public async Task SendH265Frame(uint durationRtpUnits, int payloadID, byte[] sample)
         {
             if (CheckIfCanSendRtpRaw())
             {
@@ -215,7 +211,7 @@ namespace SIPSorcery.Net
                 foreach (var nal in nals)
                 {
                     //logger.LogTrace("(out) SEND {bits}({of}/{all})", nal.NAL.Length, i++, nals.Count());
-                    SendH26XNal(durationRtpUnits, payloadID, nal.NAL, nal.IsLast, true);
+                    await SendH26XNalAsync(durationRtpUnits, payloadID, nal.NAL, nal.IsLast, true);
                 }
             }
         }
@@ -226,7 +222,7 @@ namespace SIPSorcery.Net
         /// <param name="duration">The duration in timestamp units of the payload, based on a 90Khz clock.</param>
         /// <param name="payloadTypeID">The payload ID to place in the RTP header.</param>
         /// <param name="buffer">The VP8 encoded payload as a ReadOnlySpan.</param>
-        public void SendVp8Frame(uint duration, int payloadTypeID, ReadOnlySpan<byte> buffer)
+        public async Task SendVp8FrameAsync(uint duration, int payloadTypeID, ReadOnlyMemory<byte> buffer)
         {
             if (!CheckIfCanSendRtpRaw())
             {
@@ -251,24 +247,24 @@ namespace SIPSorcery.Net
                     byte vp8HeaderByte = isFirstPacket ? (byte)0x10 : (byte)0x00;
                     isFirstPacket = false;
 
-                    // Create the final RTP payload: [VP8 Header (1 byte)][VP8 Frame Slice]
-                    // Note: This still requires an allocation. For ultra-low latency, consider using ArrayPool<byte>.
                     byte[] payload = new byte[payloadLength + 1];
                     payload[0] = vp8HeaderByte;
-                    currentSlice.CopyTo(payload.AsSpan(1));
+                    // Get the Span from the Memory slice to perform the copy.
+                    currentSlice.Span.CopyTo(payload.AsSpan(1));
 
                     // Set the marker bit only for the very last packet of the frame.
                     int markerBit = remainingBuffer.IsEmpty ? 1 : 0;
 
                     SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
-                    SendRtpRaw(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                    // Await the non-blocking send operation.
+                    await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
                 }
 
                 LocalTrack.Timestamp += duration;
             }
             catch (SocketException sockExcp)
             {
-                logger.LogError(sockExcp, "SocketException in SendVp8Frame with Span.");
+                logger.LogError(sockExcp, "SocketException in SendVp8FrameAsync.");
             }
         }
 
@@ -278,7 +274,7 @@ namespace SIPSorcery.Net
         /// <param name="durationRtpUnits"> The duration in timestamp units of the payload.</param>
         /// <param name="payloadID">The payload ID to place in the RTP header.</param>
         /// <param name="sample">The JPEG encoded payload.</param>
-        public void SendMJPEGFrame(uint durationRtpUnits, int payloadID, byte[] sample)
+        public async Task SendMJPEGFrame(uint durationRtpUnits, int payloadID, byte[] sample)
         {
             if (CheckIfCanSendRtpRaw())
             {
@@ -290,7 +286,7 @@ namespace SIPSorcery.Net
                     if (rtpHeader.Length + frameData.Data.Length <= RTPSession.RTP_MAX_PAYLOAD)
                     {
                         var payload = rtpHeader.Concat(frameData.Data).ToArray();
-                        SendRtpRaw(payload, LocalTrack.Timestamp, 1, payloadID, true);
+                        await SendRtpRawAsync(payload, LocalTrack.Timestamp, 1, payloadID, true);
                     }
                     else
                     {
@@ -303,7 +299,7 @@ namespace SIPSorcery.Net
                             var data = isLast ? restBytes : restBytes.Take(dataSize).ToArray();
                             var markerBit = isLast ? 0 : 1;
                             var payload = rtpHeader.Concat(data).ToArray();
-                            SendRtpRaw(payload, LocalTrack.Timestamp, markerBit, payloadID, true);
+                            await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadID, true);
 
                             offset += RTPSession.RTP_MAX_PAYLOAD;
                             rtpHeader = MJPEGPacketiser.GetMJPEGRTPHeader(customData, offset);
@@ -324,7 +320,7 @@ namespace SIPSorcery.Net
         /// <param name="durationRtpUnits">The duration in RTP timestamp units of the video sample. This
         /// value is added to the previous RTP timestamp when building the RTP header.</param>
         /// <param name="sample">The video sample to set as the RTP packet payload.</param>
-        public void SendVideo(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
+        public async Task SendVideoAsync(uint durationRtpUnits, ReadOnlyMemory<byte> sample)
         {
             if (!sendingFormatFound)
             {
@@ -337,10 +333,10 @@ namespace SIPSorcery.Net
             switch (sendingFormat.Codec)
             {
                 case VideoCodecsEnum.VP8:
-                    SendVp8Frame(durationRtpUnits, payloadID, sample.Span); //to-do : avoid ToArray copy
+                    await SendVp8FrameAsync(durationRtpUnits, payloadID, sample);
                     break;
                 case VideoCodecsEnum.H264:
-                    SendH264Frame(durationRtpUnits, payloadID, sample);
+                    await SendH264FrameAsync(durationRtpUnits, payloadID, sample);
                     break;
                 //case VideoCodecsEnum.H265:
                 //    SendH265Frame(durationRtpUnits, payloadID, sample);

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using SIPSorcery.Sys;
 using SIPSorceryMedia.Abstractions;
 using SIPSorcery.Net;
+using System.Threading.Tasks;
 
 namespace SIPSorcery.net.RTP
 {
@@ -38,17 +39,17 @@ namespace SIPSorcery.net.RTP
             }
         }
 
-        public void SendText(byte[] sample)
+        public async Task SendTextAsync(byte[] sample)
         {
             if (!sendingFormatFound)
             {
                 NegotiatedFormat = GetSendingFormat();
                 sendingFormatFound = true;
             }
-            SendTextFrame(NegotiatedFormat.ID, sample);
+            await SendTextFrame(NegotiatedFormat.ID, sample);
         }
 
-        private void SendTextFrame(int payloadTypeID, byte[] buffer)
+        private async Task SendTextFrame(int payloadTypeID, byte[] buffer)
         {
             if (CheckIfCanSendRtpRaw())
             {
@@ -86,7 +87,7 @@ namespace SIPSorcery.net.RTP
                         Buffer.BlockCopy(buffer, offset, payload, 0, payloadLength);
 
                         // Send the RTP packet with the updated timestamp
-                        SendRtpRaw(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
+                        await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true);
                     }
 
                     // Update the last send time
