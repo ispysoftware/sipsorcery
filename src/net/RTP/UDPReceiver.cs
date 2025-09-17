@@ -83,7 +83,7 @@ namespace SIPSorcery.net.RTP
                 {
                     // This exception is expected when a remote client disconnects (ICMP port unreachable).
                     // We log it but continue the loop without closing, which prevents stutters for other clients.
-                    logger.LogWarning($"SocketException in UdpReceiver loop ({sockExcp.SocketErrorCode}): {sockExcp.Message}");
+                    logger.LogTrace($"SocketException in UdpReceiver loop ({sockExcp.SocketErrorCode}): {sockExcp.Message}");
                 }
                 catch (ObjectDisposedException)
                 {
