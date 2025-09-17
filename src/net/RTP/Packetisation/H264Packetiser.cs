@@ -51,7 +51,7 @@ namespace SIPSorcery.Net
         {
             var ranges = new List<(int, int)>();
             int zeroes = 0;
-            int currPosn = 0;
+            int nalStartPosn = 0;
 
             for (int i = 0; i < accessUnit.Length; i++)
             {
@@ -61,14 +61,21 @@ namespace SIPSorcery.Net
                 }
                 else if (accessUnit[i] == 0x01 && zeroes >= 2)
                 {
-                    int nalStart = i + 1;
-                    if (nalStart - currPosn > 4)
+                    // Found a start code. The previous NAL unit ends here.
+                    int startCodeLength = (zeroes == 2) ? 3 : 4;
+                    int nalEndPosn = i - startCodeLength;
+
+                    if (nalEndPosn >= nalStartPosn)
                     {
-                        int endPosn = nalStart - (zeroes == 2 ? 3 : 4);
-                        int nalSize = endPosn - currPosn;
-                        ranges.Add((currPosn, nalSize));
+                        int nalLength = nalEndPosn - nalStartPosn + 1;
+                        if (nalLength > 0)
+                        {
+                            ranges.Add((nalStartPosn, nalLength));
+                        }
                     }
-                    currPosn = nalStart;
+
+                    // The next NAL starts after the 0x01 byte.
+                    nalStartPosn = i + 1;
                     zeroes = 0;
                 }
                 else
@@ -77,9 +84,10 @@ namespace SIPSorcery.Net
                 }
             }
 
-            if (currPosn < accessUnit.Length)
+            // Add the final NAL unit in the access unit.
+            if (nalStartPosn < accessUnit.Length)
             {
-                ranges.Add((currPosn, accessUnit.Length - currPosn));
+                ranges.Add((nalStartPosn, accessUnit.Length - nalStartPosn));
             }
 
             return ranges;

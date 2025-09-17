@@ -15,6 +15,7 @@
 //-----------------------------------------------------------------------------
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -155,36 +156,46 @@ namespace SIPSorcery.Net
                 SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
                 await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
             }
-            // The NAL must be fragmented across multiple RTP packets.
             else
             {
-                ReadOnlyMemory<byte> naluHeader = nal.Slice(0, naluHeaderSize);
-                var nalPayloadToFragment = nal.Slice(naluHeaderSize);
+                ReadOnlyMemory<byte> naluHeader = nal.Slice(0, 1);
+                var nalPayloadToFragment = nal.Slice(1);
                 bool isFirstPacket = true;
 
-                while (!nalPayloadToFragment.IsEmpty)
+                // Rent a buffer from the pool just once for the entire NAL.
+                // Ensure it's large enough for the biggest possible fragment.
+                byte[] rentedBuffer = ArrayPool<byte>.Shared.Rent(RTPSession.RTP_MAX_PAYLOAD + H264Packetiser.H264_RTP_HEADER_LENGTH);
+
+                try
                 {
-                    int payloadLength = Math.Min(nalPayloadToFragment.Length, RTPSession.RTP_MAX_PAYLOAD);
-                    var currentSlice = nalPayloadToFragment.Slice(0, payloadLength);
-                    nalPayloadToFragment = nalPayloadToFragment.Slice(payloadLength);
+                    while (!nalPayloadToFragment.IsEmpty)
+                    {
+                        int payloadLength = Math.Min(nalPayloadToFragment.Length, RTPSession.RTP_MAX_PAYLOAD);
+                        var currentSlice = nalPayloadToFragment.Slice(0, payloadLength);
+                        nalPayloadToFragment = nalPayloadToFragment.Slice(payloadLength);
 
-                    bool isFinalPacket = nalPayloadToFragment.IsEmpty;
-                    int markerBit = (isLastNal && isFinalPacket) ? 1 : 0;
+                        bool isFinalPacket = nalPayloadToFragment.IsEmpty;
+                        int markerBit = (isLastNal && isFinalPacket) ? 1 : 0;
 
-                    byte[] rtpHdr = is265 ?
-                        H265Packetiser.GetH265RtpHeader(naluHeader.ToArray(), isFirstPacket, isFinalPacket) :
-                        H264Packetiser.GetH264RtpHeader(naluHeader.Span[0], isFirstPacket, isFinalPacket);
+                        byte[] rtpHdr = H264Packetiser.GetH264RtpHeader(naluHeader.Span[0], isFirstPacket, isFinalPacket);
 
-                    byte[] payload = new byte[payloadLength + rtpHdr.Length];
-                    rtpHdr.CopyTo(payload, 0);
-                    currentSlice.Span.CopyTo(payload.AsSpan(rtpHdr.Length));
+                        // Use a Span<T> to represent the portion of the rented buffer we will use.
+                        var payloadSpan = rentedBuffer.AsSpan(0, payloadLength + rtpHdr.Length);
 
-                    isFirstPacket = false;
+                        // Copy data into our rented buffer slice.
+                        rtpHdr.CopyTo(payloadSpan);
+                        currentSlice.Span.CopyTo(payloadSpan.Slice(rtpHdr.Length));
 
-                    SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
+                        isFirstPacket = false;
 
-                    // This was the last blocking call - now corrected.
-                    await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
+                        // Send the slice of the rented buffer.
+                        await SendRtpRawAsync(payloadSpan.ToArray(), LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    // CRITICAL: Always return the buffer to the pool when you're done.
+                    ArrayPool<byte>.Shared.Return(rentedBuffer);
                 }
             }
 
