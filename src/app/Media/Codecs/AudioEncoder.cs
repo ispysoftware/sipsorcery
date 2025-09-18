@@ -194,17 +194,35 @@ namespace SIPSorcery.Media
                 if (_opusEncoder == null)
                 {
                     var channelCount = format.ChannelCount > 0 ? format.ChannelCount : OPUS_CHANNELS;
-                    _opusEncoder = OpusCodecFactory.CreateEncoder(format.ClockRate, channelCount, OpusApplication.OPUS_APPLICATION_VOIP);
+                    // Ensure your Opus encoder is initialized for the resampled rate (48kHz)
+                    _opusEncoder = OpusCodecFactory.CreateEncoder(8000, channelCount, OpusApplication.OPUS_APPLICATION_VOIP);
+                    _opusEncoder.Complexity = 5;
+                    _opusEncoder.Bitrate = 16000;
+                    _opusEncoder.UseInbandFEC = true;
+
                 }
 
-                if (pcm.Length > _opusEncoder.NumChannels * OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL)
+                // --- FIX STARTS HERE ---
+
+                // 1. Correctly calculate samples per channel from the byte buffer.
+                // Each sample is 16-bit, so 2 bytes.
+                const int bytesPerSample = 2;
+                int totalSamples = pcm.Length / bytesPerSample;
+                int samplesPerChannel = totalSamples / _opusEncoder.NumChannels;
+
+                // 2. The check now correctly compares samples-per-channel to the limit.
+                if (samplesPerChannel > OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL)
                 {
-                    logger.LogWarning("OPUS input sample exceeded maximum limit.");
+                    logger.LogWarning($"OPUS input sample count per channel ({samplesPerChannel}) exceeded maximum limit ({OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL}).");
                     return 0;
                 }
 
                 Span<byte> tempBuffer = stackalloc byte[OPUS_MAXIMUM_ENCODED_FRAME_SIZE];
-                int encodedLength = _opusEncoder.Encode(pcm, pcm.Length / _opusEncoder.NumChannels, tempBuffer, tempBuffer.Length);
+
+                // 3. Pass the correct samples-per-channel count to the encoder.
+                int encodedLength = _opusEncoder.Encode(pcm, samplesPerChannel, tempBuffer, tempBuffer.Length);
+
+                // --- FIX ENDS HERE ---
 
                 if (destination.Length < encodedLength) return 0;
 
