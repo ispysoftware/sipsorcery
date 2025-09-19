@@ -197,18 +197,11 @@ namespace SIPSorcery.Media
                     // Ensure your Opus encoder is initialized for the resampled rate (48kHz)
                     _opusEncoder = OpusCodecFactory.CreateEncoder(8000, channelCount, OpusApplication.OPUS_APPLICATION_VOIP);
                     _opusEncoder.Complexity = 5;
-                    _opusEncoder.Bitrate = 16000;
                     _opusEncoder.UseInbandFEC = true;
 
                 }
 
-                // --- FIX STARTS HERE ---
-
-                // 1. Correctly calculate samples per channel from the byte buffer.
-                // Each sample is 16-bit, so 2 bytes.
-                const int bytesPerSample = 2;
-                int totalSamples = pcm.Length / bytesPerSample;
-                int samplesPerChannel = totalSamples / _opusEncoder.NumChannels;
+                int samplesPerChannel = pcm.Length / _opusEncoder.NumChannels;
 
                 // 2. The check now correctly compares samples-per-channel to the limit.
                 if (samplesPerChannel > OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL)
