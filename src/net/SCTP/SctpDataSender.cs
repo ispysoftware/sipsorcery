@@ -24,6 +24,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 using SIPSorcery.Sys;
 
 namespace SIPSorcery.Net
@@ -312,6 +313,12 @@ namespace SIPSorcery.Net
             
         }
 
+        private static readonly ObjectPool<List<SctpDataChunk>> _listPool = new DefaultObjectPool<List<SctpDataChunk>>(
+            new ListObjectPolicy<SctpDataChunk>()
+        );
+        // In your class, add the new pool alongside your list pool
+        private static readonly ObjectPool<SctpDataChunk> _chunkPool =
+            new DefaultObjectPool<SctpDataChunk>(new SctpDataChunkPolicy());
         /// <summary>
         /// Sends a DATA chunk to the remote peer.
         /// </summary>
@@ -325,77 +332,94 @@ namespace SIPSorcery.Net
                 return;
             }
 
-            var chunksToQueue = new List<SctpDataChunk>();
-
-            // The stream sequence number logic and data fragmentation needs to be atomic for a single SendData call.
-            lock (_sendLock)
+            // 1. Get a list from the pool instead of creating a new one.
+            List<SctpDataChunk> chunksToQueue = _listPool.Get();
+            try
             {
-                // Double check closed state after acquiring lock.
-                if (_closed.HasOccurred)
+                lock (_sendLock)
                 {
-                    return;
-                }
-
-                ushort seqnum = 0;
-                if (_streamSeqnums.ContainsKey(streamID))
-                {
-                    unchecked
+                    // Double check closed state after acquiring lock.
+                    if (_closed.HasOccurred)
                     {
-                        _streamSeqnums[streamID] = (ushort)(_streamSeqnums[streamID] + 1);
-                        seqnum = _streamSeqnums[streamID];
+                        return;
+                    }
+
+                    ushort seqnum = 0;
+                    if (_streamSeqnums.ContainsKey(streamID))
+                    {
+                        unchecked
+                        {
+                            _streamSeqnums[streamID] = (ushort)(_streamSeqnums[streamID] + 1);
+                            seqnum = _streamSeqnums[streamID];
+                        }
+                    }
+                    else
+                    {
+                        _streamSeqnums.Add(streamID, 0);
+                    }
+
+                    for (int index = 0; index * _defaultMTU < data.Length; index++)
+                    {
+                        int offset = (index == 0) ? 0 : (index * _defaultMTU);
+                        int payloadLength = (offset + _defaultMTU < data.Length) ? _defaultMTU : data.Length - offset;
+
+                        bool isBegining = index == 0;
+                        bool isEnd = ((offset + payloadLength) >= data.Length) ? true : false;
+
+                        SctpDataChunk dataChunk = _chunkPool.Get();
+                        dataChunk.Initialize(
+                            false,
+                            isBegining,
+                            isEnd,
+                            TSN,
+                            streamID,
+                            seqnum,
+                            ppid,
+                            data.Slice(offset, payloadLength));
+                        //SctpDataChunk dataChunk = new SctpDataChunk(
+                        //    false,
+                        //    isBegining,
+                        //    isEnd,
+                        //    TSN,
+                        //    streamID,
+                        //    seqnum,
+                        //    ppid,
+                        //    data.Slice(offset, payloadLength));
+
+                        chunksToQueue.Add(dataChunk);
+
+                        Interlocked.Increment(ref tsn);
                     }
                 }
-                else
+
+                bool chunkQueued = false;
+                foreach (var chunk in chunksToQueue)
                 {
-                    _streamSeqnums.Add(streamID, 0);
+                    try
+                    {
+                        // Add the chunk to the blocking collection. This will block if the queue is full,
+                        // creating backpressure. It will throw an exception if the collection is closed
+                        // or the cancellation token is triggered.
+                        _sendQueue.Add(chunk, _closeCts.Token);
+                        chunkQueued = true;
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException || ex is OperationCanceledException)
+                    {
+                        logger.LogWarning(ex, "SCTP SendData could not queue chunk for TSN {TSN} as sender is closing.", chunk.TSN);
+                        //chunk.Dispose();
+                        _chunkPool.Return(chunk);
+                    }
                 }
 
-                for (int index = 0; index * _defaultMTU < data.Length; index++)
+                if (chunkQueued)
                 {
-                    int offset = (index == 0) ? 0 : (index * _defaultMTU);
-                    int payloadLength = (offset + _defaultMTU < data.Length) ? _defaultMTU : data.Length - offset;
-
-                    bool isBegining = index == 0;
-                    bool isEnd = ((offset + payloadLength) >= data.Length) ? true : false;
-
-                    SctpDataChunk dataChunk = new SctpDataChunk(
-                        false,
-                        isBegining,
-                        isEnd,
-                        TSN,
-                        streamID,
-                        seqnum,
-                        ppid,
-                        data.Slice(offset, payloadLength));
-
-                    chunksToQueue.Add(dataChunk);
-
-                    Interlocked.Increment(ref tsn);
+                    // Wake the sender thread to process the new chunk(s).
+                    _senderMre.Set();
                 }
             }
-
-            bool chunkQueued = false;
-            foreach (var chunk in chunksToQueue)
+            finally
             {
-                try
-                {
-                    // Add the chunk to the blocking collection. This will block if the queue is full,
-                    // creating backpressure. It will throw an exception if the collection is closed
-                    // or the cancellation token is triggered.
-                    _sendQueue.Add(chunk, _closeCts.Token);
-                    chunkQueued = true;
-                }
-                catch (Exception ex) when (ex is InvalidOperationException || ex is OperationCanceledException)
-                {
-                    logger.LogWarning(ex, "SCTP SendData could not queue chunk for TSN {TSN} as sender is closing.", chunk.TSN);
-                    chunk.Dispose();
-                }
-            }
-
-            if (chunkQueued)
-            {
-                // Wake the sender thread to process the new chunk(s).
-                _senderMre.Set();
+                _listPool.Return(chunksToQueue);
             }
         }
 
@@ -437,14 +461,14 @@ namespace SIPSorcery.Net
                 // Dispose any chunks that have been sent but not yet acknowledged.
                 foreach (var chunk in _unconfirmedChunks.Values)
                 {
-                    chunk.Dispose();
+                    _chunkPool.Return(chunk);
                 }
                 _unconfirmedChunks.Clear();
 
                 // Drain the send queue and dispose any chunks that were never sent.
                 while (_sendQueue.TryTake(out var chunk))
                 {
-                    chunk.Dispose();
+                    _chunkPool.Return(chunk);
                 }
 
                 _sendQueue.Dispose();
@@ -485,7 +509,8 @@ namespace SIPSorcery.Net
                         {
                             logger.LogTrace("SCTP acknowledged data chunk receipt in gap report for TSN {TSN}", goodTSN);
                             highestTsnNewlyAcknowledged = goodTSN;
-                            chunk.Dispose();
+                            //chunk.Dispose();
+                            _chunkPool.Return(chunk);
                         }
                     }
                 }
@@ -602,7 +627,8 @@ namespace SIPSorcery.Net
         {
             if (_unconfirmedChunks.TryRemove(tsn, out var chunk))
             {
-                chunk.Dispose();
+                //chunk.Dispose();
+                _chunkPool.Return(chunk);
             }
         }
 
@@ -858,6 +884,41 @@ namespace SIPSorcery.Net
                     return _congestionWindow;
                 }
             }
+        }
+    }
+
+    public class ListObjectPolicy<T> : IPooledObjectPolicy<List<T>>
+    {
+        /// <summary>
+        /// Creates a new List<T> when the pool is empty.
+        /// </summary>
+        public List<T> Create()
+        {
+            return new List<T>();
+        }
+
+        /// <summary>
+        /// Resets the list by calling .Clear() when it's returned to the pool.
+        /// Returns true to indicate the object is safe to be reused.
+        /// </summary>
+        public bool Return(List<T> obj)
+        {
+            obj.Clear();
+            return true;
+        }
+    }
+
+    // Policy for creating and resetting SctpDataChunk objects
+    public class SctpDataChunkPolicy : IPooledObjectPolicy<SctpDataChunk>
+    {
+        public SctpDataChunk Create() => new SctpDataChunk();
+
+        public bool Return(SctpDataChunk obj)
+        {
+            // When an object is returned to the pool, dispose its internal buffer
+            // so the array is returned to the ArrayPool.
+            obj.Dispose();
+            return true;
         }
     }
 }

@@ -104,9 +104,41 @@ namespace SIPSorcery.Net
         internal Timestamp LastSentAt;
         internal int SendCount;
 
-        private SctpDataChunk()
+        public SctpDataChunk()
             : base(SctpChunkType.DATA)
         { }
+
+        // Add this new method to set up a recycled object
+        public void Initialize(
+            bool isUnordered,
+            bool isBegining,
+            bool isEnd,
+            uint tsn,
+            ushort streamID,
+            ushort seqnum,
+            uint ppid,
+            ReadOnlySpan<byte> data)
+        {
+            // (Move all the logic from your old constructor here)
+            if (data.Length == 0)
+            {
+                throw new ArgumentNullException(nameof(data), "The SctpDataChunk data parameter cannot be empty.");
+            }
+
+            Unordered = isUnordered;
+            Begining = isBegining;
+            Ending = isEnd;
+            TSN = tsn;
+            StreamID = streamID;
+            StreamSeqNum = seqnum;
+            PPID = ppid;
+            userData.Set(data); // This correctly rents a buffer from the ArrayPool
+
+            ChunkFlags = (byte)(
+                (Unordered ? 0x04 : 0x0) +
+                (Begining ? 0x02 : 0x0) +
+                (Ending ? 0x01 : 0x0));
+        }
 
         /// <summary>
         /// Creates a new DATA chunk.
