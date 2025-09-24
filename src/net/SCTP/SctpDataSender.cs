@@ -147,7 +147,7 @@ namespace SIPSorcery.Net
         /// </summary>
         private Dictionary<ushort, ushort> _streamSeqnums = new Dictionary<ushort, ushort>();
 
-        public int MaxSendQueueCount => 128;
+        //public int MaxSendQueueCount => 1280;
 
         /// <summary>
         /// Queue to hold SCTP frames that are waiting to be sent to the remote peer.
@@ -190,7 +190,7 @@ namespace SIPSorcery.Net
             _defaultMTU = defaultMTU > 0 ? defaultMTU : DEFAULT_SCTP_MTU;
             _initialTSN = initialTSN;
             tsn = unchecked((int)initialTSN);
-            _sendQueue = new BlockingCollection<SctpDataChunk>(MaxSendQueueCount);
+            _sendQueue = new BlockingCollection<SctpDataChunk>();
 
             // RFC4960 7.2.1 (point 1)
             _congestionWindow = (uint)(Math.Min(4 * _defaultMTU, Math.Max(2 * _defaultMTU, CONGESTION_WINDOW_FACTOR)));
