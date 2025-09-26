@@ -61,7 +61,7 @@ namespace SIPSorcery.Media
             }
         }
 
-        private async void HandleAudioSampleAsync(uint duration, ReadOnlyMemory<byte> buffer)
+        private async Task HandleAudioSampleAsync(uint duration, ReadOnlyMemory<byte> buffer)
         {
             try
             {

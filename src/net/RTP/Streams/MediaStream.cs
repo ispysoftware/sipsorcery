@@ -106,7 +106,7 @@ namespace SIPSorcery.net.RTP
         ///  - The media type the packet contains, will be audio or video,
         ///  - The RTP Header exension URI.
         /// </summary>
-        public event Action<int, IPEndPoint, SDPMediaTypesEnum, string, RTPHeaderExtension> OnRtpHeaderReceivedByIndex;
+        public event Action<int, IPEndPoint, SDPMediaTypesEnum, string, object> OnRtpHeaderReceivedByIndex;
 
         /// <summary>
         /// Gets fired when an RTP event is detected on the remote call party's RTP stream.
@@ -415,6 +415,11 @@ namespace SIPSorcery.net.RTP
         }
 
 
+        /// <summary>
+        /// A high-performance, asynchronous method to send an RTP packet.
+        /// This is the correct version to use with an async-await compatible call stack
+        /// (i.e., one initiated from a delegate that returns a Task).
+        /// </summary>
         protected async Task SendRtpRawAsync(ReadOnlyMemory<byte> payload, uint timestamp, int markerBit, int payloadType, bool checkDone, ushort? seqNum = null)
         {
             if (!(checkDone || CheckIfCanSendRtpRaw()))
@@ -425,22 +430,17 @@ namespace SIPSorcery.net.RTP
             var extensions = LocalTrack?.HeaderExtensions?.Values;
             bool hasExtensions = extensions?.Count > 0;
 
+            // Rent a single buffer large enough for header, extensions, payload, and SRTP protection.
             int maxExtensionSize = hasExtensions ? 256 : 0;
-            int maxPacketSize = RTPHeader.MIN_HEADER_LEN + maxExtensionSize + payload.Length + RTPSession.SRTP_MAX_PREFIX_LENGTH;
+            // Use a constant for SRTP prefix length for clarity.
+            const int SRTP_MAX_PREFIX_LENGTH = 16;
+            int maxPacketSize = RTPHeader.MIN_HEADER_LEN + maxExtensionSize + payload.Length + SRTP_MAX_PREFIX_LENGTH;
             byte[] rentedBuffer = ArrayPool<byte>.Shared.Rent(maxPacketSize);
 
             try
             {
                 var packetSpan = rentedBuffer.AsSpan();
                 int cursor = 0;
-
-                // (Packet building logic remains the same)
-                ReadOnlyMemory<byte> extensionPayload = ReadOnlyMemory<byte>.Empty;
-                ushort extensionLengthInWords = 0;
-                if (hasExtensions)
-                {
-                    // ... (your existing extension building code) ...
-                }
 
                 var header = new RTPHeader
                 {
@@ -449,28 +449,76 @@ namespace SIPSorcery.net.RTP
                     Timestamp = timestamp,
                     MarkerBit = markerBit,
                     PayloadType = payloadType,
-                    HeaderExtensionFlag = hasExtensions ? 1 : 0,
-                    ExtensionProfile = hasExtensions ? RTPHeader.ONE_BYTE_EXTENSION_PROFILE : (ushort)0,
-                    ExtensionLength = extensionLengthInWords,
-                    ExtensionPayload = extensionPayload
+                    // The extension flag will be set later if extensions are successfully written.
+                    HeaderExtensionFlag = 0
                 };
 
+                // A. Write the main 12-byte header. We will patch the extension bit later if needed.
                 cursor += header.WriteTo(packetSpan);
 
+                if (hasExtensions)
+                {
+                    // --- This block now faithfully replicates the original's logic ---
+
+                    int extensionPayloadStartCursor = cursor + 4; // Leave 4 bytes for the extension header.
+                    int currentExtensionCursor = extensionPayloadStartCursor;
+
+                    // 1. Marshal all individual extensions into a contiguous block in our buffer.
+                    foreach (var ext in extensions)
+                    {
+                        // The original's check for valid extension IDs.
+                        if (ext.Id < 1 || ext.Id > 14)
+                        {
+                            continue;
+                        }
+                        int bytesWritten = ext.Marshal(packetSpan.Slice(currentExtensionCursor));
+                        currentExtensionCursor += bytesWritten;
+                    }
+
+                    int extensionPayloadLength = currentExtensionCursor - extensionPayloadStartCursor;
+
+                    if (extensionPayloadLength > 0)
+                    {
+                        // 2. Add padding to ensure the extension block is a multiple of 4 bytes.
+                        int padding = 0;
+                        if (extensionPayloadLength % 4 != 0)
+                        {
+                            padding = 4 - (extensionPayloadLength % 4);
+                            packetSpan.Slice(currentExtensionCursor, padding).Clear();
+                        }
+
+                        int totalExtensionLength = extensionPayloadLength + padding;
+                        ushort extensionLengthInWords = (ushort)(totalExtensionLength / 4);
+
+                        // 3. Now that we have the final length, write the 4-byte extension header.
+                        BinaryPrimitives.WriteUInt16BigEndian(packetSpan.Slice(cursor), RTPHeader.ONE_BYTE_EXTENSION_PROFILE);
+                        BinaryPrimitives.WriteUInt16BigEndian(packetSpan.Slice(cursor + 2), extensionLengthInWords);
+
+                        // 4. Update the main cursor to be at the end of the full extension block.
+                        cursor += 4 + totalExtensionLength;
+
+                        // 5. Surgically patch the extension bit on the main header.
+                        packetSpan[0] |= 0x10; // Set the 'X' bit.
+                    }
+                }
+
+                // B. Copy the main RTP payload after the header and any extensions.
                 payload.Span.CopyTo(packetSpan.Slice(cursor));
                 cursor += payload.Length;
 
-                var finalPacketToSend = packetSpan.Slice(0, cursor);
-                int packetLength = finalPacketToSend.Length;
+                int packetLength = cursor;
 
-                // Handle SRTP protection and send.
+                // D. Handle SRTP protection and send.
                 ProtectRtpPacket protectRtpPacket = SecureContext?.ProtectRtpPacket;
                 if (protectRtpPacket == null)
                 {
-                    await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, rentedBuffer.AsMemory(0, packetLength)).ConfigureAwait(false);
+                    // If not protecting, we create a copy of the exact size to send.
+                    var packetCopy = rentedBuffer.AsMemory(0, packetLength).ToArray();
+                    await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, new ArraySegment<byte>(packetCopy)).ConfigureAwait(false);
                 }
                 else
                 {
+                    // If protecting, we pass the original rentedBuffer which has space for the SRTP overhead.
                     int rtperr = protectRtpPacket(rentedBuffer, packetLength, out int outBufLen);
                     if (rtperr != 0)
                     {
@@ -478,13 +526,12 @@ namespace SIPSorcery.net.RTP
                     }
                     else
                     {
-                        await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, rentedBuffer.AsMemory(0, outBufLen)).ConfigureAwait(false);
+                        // Send the protected packet, which may be longer than the original.
+                        await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, new ArraySegment<byte>(rentedBuffer, 0, outBufLen)).ConfigureAwait(false);
                     }
                 }
 
                 m_lastRtpTimestamp = timestamp;
-
-                // --- FIX 2: Use the saved integer variable instead of the Span ---
                 RtcpSession?.RecordRtpPacketSend(packetLength, header.SequenceNumber, header.Timestamp);
             }
             finally
@@ -492,6 +539,7 @@ namespace SIPSorcery.net.RTP
                 ArrayPool<byte>.Shared.Return(rentedBuffer);
             }
         }
+
 
         protected async Task SendRtpRawAsync(byte[] data, uint timestamp, int markerBit, int payloadType, bool checkDone, ushort? seqNum = null)
         {
@@ -1001,10 +1049,10 @@ namespace SIPSorcery.net.RTP
                 if (RemoteTrack?.HeaderExtensions?.TryGetValue(rtpHeaderExtensionData.Id, out RTPHeaderExtension rtpHeaderExtension) == true)
                 {
                     // Call the new Unmarshal method, which takes a ReadOnlySpan<byte> and populates the object.
-                    rtpHeaderExtension.Unmarshal(rtpHeaderExtensionData.Data.Span);
+                    var value = rtpHeaderExtension.Unmarshal(header, rtpHeaderExtensionData.Data.Span);
 
                     // Pass the entire populated extension object to the event handler.
-                    OnRtpHeaderReceivedByIndex?.Invoke(Index, remoteEndPoint, MediaType, rtpHeaderExtension.Uri, rtpHeaderExtension);
+                    OnRtpHeaderReceivedByIndex?.Invoke(Index, remoteEndPoint, MediaType, rtpHeaderExtension.Uri, value);
                 }
             }
         }

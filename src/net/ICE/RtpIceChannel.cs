@@ -523,7 +523,7 @@ namespace SIPSorcery.Net
                             CloseTcp(rtpTcpReceiver, reason);
                         };
                         rtpTcpReceiver.OnPacketReceived += OnRTPPacketReceived;
-                        rtpTcpReceiver.OnClosed += onClose;
+                        rtpTcpReceiver.OnClosed += RtpTcpReceiver_OnClosed;
                         rtpTcpReceiver.Start();
 
                         m_rtpTcpReceiverByUri.Add(stunUri, rtpTcpReceiver);
@@ -554,7 +554,10 @@ namespace SIPSorcery.Net
             {
                 if (target != null && !target.IsClosed)
                 {
-                    target?.Close(null);
+                    target.OnPacketReceived -= OnRTPPacketReceived;
+                    target.OnClosed -= RtpTcpReceiver_OnClosed;
+
+                    target.Close(reason);
                 }
             }
             catch (Exception excp)
@@ -607,6 +610,8 @@ namespace SIPSorcery.Net
                 _connectivityChecksTimer?.Dispose();
                 _processIceServersTimer?.Dispose();
                 _refreshTurnTimer?.Dispose();
+                OnClosed -= CloseTcp;
+                base.Close("RtpIceChannel is closing");
             }
         }
 
@@ -2557,6 +2562,16 @@ namespace SIPSorcery.Net
             {
                 // Now calling the async base method
                 return await base.SendAsync(sendOn, dstEndPoint, buffer, onFailure).ConfigureAwait(false);
+            }
+        }
+
+        private void RtpTcpReceiver_OnClosed(string reason)
+        {
+            // Find the receiver that triggered the event.
+            var receiver = m_rtpTcpReceiverByUri.Values.FirstOrDefault(r => !r.IsClosed);
+            if (receiver != null)
+            {
+                CloseTcp(receiver, reason);
             }
         }
     }

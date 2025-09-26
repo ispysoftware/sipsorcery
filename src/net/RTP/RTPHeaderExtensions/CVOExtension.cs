@@ -89,15 +89,23 @@ namespace SIPSorcery.Net
         /// <returns>The number of bytes written (always 1 for this extension).</returns>
         public override int Marshal(Span<byte> destination)
         {
-            if (destination.Length < RTP_HEADER_EXTENSION_SIZE)
+            const int RTP_HEADER_EXTENSION_PAYLOAD_SIZE = 1; // 1-byte payload.
+            const int TOTAL_EXTENSION_SIZE = 1 + RTP_HEADER_EXTENSION_PAYLOAD_SIZE;
+
+            if (destination.Length < TOTAL_EXTENSION_SIZE)
             {
-                throw new ArgumentException("Destination buffer is too small for the CVO payload.", nameof(destination));
+                throw new ArgumentException($"Destination buffer is too small for CVO payload, requires {TOTAL_EXTENSION_SIZE} bytes.", nameof(destination));
             }
 
-            // The cvo_byte is pre-calculated when Set is called.
-            destination[0] = _cvo_byte;
+            // Per RFC, for a 1-byte payload, length (L) is 0. (L+1 = 1 byte).
+            // The formula is (id << 4) | L. So, (Id << 4) | 0.
+            byte headerByte = (byte)(Id << 4);
+            destination[0] = headerByte;
 
-            return RTP_HEADER_EXTENSION_SIZE;
+            // Write the actual cvo_byte as the payload.
+            destination[1] = _cvo_byte;
+
+            return TOTAL_EXTENSION_SIZE;
         }
 
         /// <summary>
@@ -105,21 +113,19 @@ namespace SIPSorcery.Net
         /// internal CVO state.
         /// </summary>
         /// <param name="data">The buffer slice containing the 1-byte extension payload.</param>
-        public override void Unmarshal(ReadOnlySpan<byte> data)
+        public override object Unmarshal(RTPHeader header, ReadOnlySpan<byte> data)
         {
-            if (data.Length != RTP_HEADER_EXTENSION_SIZE)
+            const int RTP_HEADER_EXTENSION_PAYLOAD_SIZE = 1;
+            if (data.Length == RTP_HEADER_EXTENSION_PAYLOAD_SIZE)
             {
-                throw new ArgumentException($"Invalid CVO extension payload size, expected {RTP_HEADER_EXTENSION_SIZE} but got {data.Length}.");
+                var cvoByte = data[0];
+                if (_cvo_byte != cvoByte)
+                {
+                    _cvo_byte = cvoByte;
+                    _cvo = new CVO(_cvo_byte);
+                }
             }
-
-            byte cvoByte = data[0];
-
-            // Only create a new CVO object if the orientation has actually changed.
-            if (_cvo_byte != cvoByte)
-            {
-                _cvo_byte = cvoByte;
-                _cvo = new CVO(_cvo_byte);
-            }
+            return _cvo;
         }
 
         /// <summary>

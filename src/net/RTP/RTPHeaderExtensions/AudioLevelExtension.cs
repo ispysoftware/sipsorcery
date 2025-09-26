@@ -11,15 +11,26 @@ namespace SIPSorcery.Net
         /// </summary>
         public class AudioLevel
         {
-            public bool Voice;
-            public ushort Level; // Level is 0-127, but ushort is used in original.
+            public Boolean Voice;
+            public ushort Level;
 
-            public AudioLevel(bool voice, ushort level)
+            public AudioLevel()
             {
-                Voice = voice;
-                Level = level;
+                Voice = false;
+                Level = 0;
             }
-        }
+
+            public AudioLevel(ReadOnlySpan<byte> data)
+            {
+                if (data.IsEmpty || (data.Length != AudioLevelExtension.RTP_HEADER_EXTENSION_SIZE))
+                {
+                    throw new ArgumentException(nameof(data));
+                }
+
+                Voice = (data[0] & 0x80) != 0;
+                Level = (ushort)(data[0] & 0x7F);
+            }
+        };
 
         public const string RTP_HEADER_EXTENSION_URI = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
 
@@ -34,7 +45,11 @@ namespace SIPSorcery.Net
         // Constructor and other methods remain the same...
         public AudioLevelExtension(int id) : base(id, RTP_HEADER_EXTENSION_URI, SUPPORTED_URIS, RTP_HEADER_EXTENSION_SIZE, RTPHeaderExtensionType.OneByte, Net.SDPMediaTypesEnum.audio)
         {
-            _audioLevel = new AudioLevel(false, 0);
+            _audioLevel = new AudioLevel()
+            {
+                Voice = false,
+                Level = 0
+            };
         }
 
         public override void Set(Object value)
@@ -48,43 +63,46 @@ namespace SIPSorcery.Net
         // --- START OF REFACTORED METHODS ---
 
         /// <summary>
-        /// Writes the 1-byte audio level payload into the destination buffer.
+        /// Marshals the Audio Level header and payload into the destination buffer.
         /// </summary>
         public override int Marshal(Span<byte> destination)
         {
-            if (destination.Length < RTP_HEADER_EXTENSION_SIZE)
+            const int RTP_HEADER_EXTENSION_PAYLOAD_SIZE = 1; // 1-byte payload.
+            const int TOTAL_EXTENSION_SIZE = 1 + RTP_HEADER_EXTENSION_PAYLOAD_SIZE;
+
+            if (destination.Length < TOTAL_EXTENSION_SIZE)
             {
-                throw new ArgumentException("Destination buffer is too small for the Audio Level payload.", nameof(destination));
+                throw new ArgumentException($"Destination buffer is too small for Audio Level payload, requires {TOTAL_EXTENSION_SIZE} bytes.", nameof(destination));
             }
 
-            // Combine the voice bit (0x80) and the level (0-127) into a single byte.
-            byte payloadByte = (byte)((_audioLevel.Voice ? 0x80 : 0x00) | _audioLevel.Level);
-            destination[0] = payloadByte;
+            // Per RFC, for a 1-byte payload, length (L) is 0.
+            // The formula is (id << 4) | L. So, (Id << 4) | 0.
+            byte headerByte = (byte)(Id << 4);
+            destination[0] = headerByte;
 
-            return RTP_HEADER_EXTENSION_SIZE;
+            // Construct the payload byte from the current audio level state.
+            byte voice = _audioLevel.Voice ? (byte)0x80 : (byte)0;
+            destination[1] = (byte)(voice | _audioLevel.Level);
+
+            return TOTAL_EXTENSION_SIZE;
         }
 
         /// <summary>
-        /// Parses the 1-byte audio level payload from a buffer and updates the
-        /// internal audio level state.
+        /// Unmarshals the Audio Level data from the provided buffer, updates the
+        /// internal state, and returns the parsed AudioLevel object.
         /// </summary>
-        public override void Unmarshal(ReadOnlySpan<byte> data)
+        /// <returns>An AudioLevel object representing the voice activity and level.</returns>
+        public override object Unmarshal(RTPHeader header, ReadOnlySpan<byte> data)
         {
-            if (data.Length != RTP_HEADER_EXTENSION_SIZE)
+            const int RTP_HEADER_EXTENSION_PAYLOAD_SIZE = 1;
+            if (!data.IsEmpty && data.Length == RTP_HEADER_EXTENSION_PAYLOAD_SIZE)
             {
-                throw new ArgumentException($"Invalid Audio Level extension payload size, expected {RTP_HEADER_EXTENSION_SIZE} but got {data.Length}.");
+                // Update the internal state with the new audio level from the packet.
+                _audioLevel = new AudioLevel(data);
             }
 
-            byte payloadByte = data[0];
-
-            // The voice flag is the most significant bit (MSB).
-            bool voice = (payloadByte & 0x80) == 0x80;
-
-            // The level is the lower 7 bits.
-            ushort level = (ushort)(payloadByte & 0x7F);
-
-            // Update the internal state with the parsed values.
-            _audioLevel = new AudioLevel(voice, level);
+            // Return the current state, whether it was just updated or is the previous value.
+            return _audioLevel;
         }
     }
 }

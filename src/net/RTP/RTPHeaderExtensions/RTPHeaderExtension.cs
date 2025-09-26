@@ -121,7 +121,7 @@ namespace SIPSorcery.Net
         /// Parses the extension's payload from a buffer slice.
         /// </summary>
         /// <param name="data">The buffer slice containing the extension payload.</param>
-        public abstract void Unmarshal(ReadOnlySpan<byte> data);
+        public abstract object Unmarshal(RTPHeader header, ReadOnlySpan<byte> data);
     }
 
     public enum RTPHeaderExtensionType
