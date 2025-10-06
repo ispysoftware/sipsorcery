@@ -249,7 +249,6 @@ namespace SIPSorcery.Net
     ReadOnlyMemory<byte> buffer,
     Func<Exception, bool>? onFailure = null)
         {
-            // --- Initial validation checks (unchanged) ---
             if (m_isClosed)
             {
                 return SocketError.Disconnecting;

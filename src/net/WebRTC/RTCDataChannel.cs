@@ -177,7 +177,7 @@ namespace SIPSorcery.Net
         {
             if (_transport.state != RTCSctpTransportState.Connected)
             {
-                throw new InvalidOperationException("SCTP transport is not connected.");
+                throw new ApplicationException("SCTP transport is not connected.");
             }
 
             lock (_sendLock)

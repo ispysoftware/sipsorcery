@@ -2253,7 +2253,6 @@ namespace SIPSorcery.Net
         {
             IPEndPoint dstEndPoint = iceServer?.ServerEndPoint;
 
-            // --- Initial validation checks (unchanged) ---
             if (IsClosed)
             {
                 return SocketError.Disconnecting;

@@ -93,10 +93,8 @@ namespace SIPSorcery.Net
             return ranges;
         }
 
-        // The GetH264RtpHeader method remains unchanged.
         public static byte[] GetH264RtpHeader(byte nal0, bool isFirstPacket, bool isFinalPacket)
         {
-            // ... same as before
             byte nalType = (byte)(nal0 & 0x1F);
             byte firstHdrByte = (byte)(nal0 & 0xE0);
             byte fuIndicator = (byte)(firstHdrByte | 28);
