@@ -180,7 +180,7 @@ namespace SIPSorcery.Net
                 throw new ApplicationException("SCTP transport is not connected.");
             }
 
-            lock (_sendLock)
+            using (_sendLock.EnterScope())
             {
                 _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(), ppid, data);
             }
@@ -214,7 +214,7 @@ namespace SIPSorcery.Net
                 Protocol = protocol,
             };
 
-            lock (_sendLock)
+            using (_sendLock.EnterScope())
             {
                 _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(),
                        (uint)DataChannelPayloadProtocols.WebRTC_DCEP,
@@ -228,7 +228,7 @@ namespace SIPSorcery.Net
         /// </summary>
         internal void SendDcepAck()
         {
-            lock (_sendLock)
+            using (_sendLock.EnterScope())
             {
                 _transport.RTCSctpAssociation.SendData(id.GetValueOrDefault(),
                        (uint)DataChannelPayloadProtocols.WebRTC_DCEP,

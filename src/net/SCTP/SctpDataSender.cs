@@ -336,7 +336,7 @@ namespace SIPSorcery.Net
             List<SctpDataChunk> chunksToQueue = _listPool.Get();
             try
             {
-                lock (_sendLock)
+                using (_sendLock.EnterScope())
                 {
                     // Double check closed state after acquiring lock.
                     if (_closed.HasOccurred)

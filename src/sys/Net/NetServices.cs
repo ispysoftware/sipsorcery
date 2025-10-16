@@ -97,11 +97,21 @@ namespace SIPSorcery.Sys
         /// A lookup collection to cache the local IP address for a destination address. The collection will cache results of
         /// asking the Operating System which local address to use for a destination address. The cache saves a relatively 
         /// expensive call to create a socket and ask the OS for a route lookup.
-        /// 
-        /// TODO:  Clear this cache if the state of the local network interfaces change.
         /// </summary>
         private static ConcurrentDictionary<IPAddress, Tuple<IPAddress, DateTime>> m_localAddressTable =
             new ConcurrentDictionary<IPAddress, Tuple<IPAddress, DateTime>>();
+
+        static NetServices()
+        {
+            NetworkChange.NetworkAddressChanged += (_, _) =>
+            {
+                // Clear cached addresses if the state of the local network interfaces change.
+                m_localAddressTable.Clear();
+                _localIPAddresses = null;
+                _internetDefaultAddress = null;
+                _internetDefaultIPv6Address = null;
+            };
+        }
 
         /// <summary>
         /// The list of IP addresses that this machine can use.
@@ -110,7 +120,6 @@ namespace SIPSorcery.Sys
         {
             get
             {
-                // TODO: Reset if the local network interfaces change.
                 if (_localIPAddresses == null)
                 {
                     _localIPAddresses = NetServices.GetAllLocalIPAddresses();
@@ -133,7 +142,6 @@ namespace SIPSorcery.Sys
         {
             get
             {
-                // TODO: Reset if the local network interfaces change.
                 if (_internetDefaultAddress == null)
                 {
                     _internetDefaultAddress = GetLocalAddressForInternet();
@@ -151,7 +159,6 @@ namespace SIPSorcery.Sys
         {
             get
             {
-                // TODO: Reset if the local network interfaces change.
                 if (_internetDefaultIPv6Address == null)
                 {
                     _internetDefaultIPv6Address = GetLocalIPv6AddressForInternet();
@@ -608,56 +615,57 @@ namespace SIPSorcery.Sys
 
             if (m_localAddressTable.TryGetValue(destination, out var cachedAddress))
             {
-                if (DateTime.Now.Subtract(cachedAddress.Item2).TotalSeconds >= LOCAL_ADDRESS_CACHE_LIFETIME_SECONDS)
+                if (DateTime.Now.Subtract(cachedAddress.Item2).TotalSeconds < LOCAL_ADDRESS_CACHE_LIFETIME_SECONDS)
                 {
-                    m_localAddressTable.TryRemove(destination, out _);
-                }
-
-                return cachedAddress.Item1;
-            }
-            else
-            {
-                IPAddress localAddress = null;
-
-                if (destination.AddressFamily == AddressFamily.InterNetwork || destination.IsIPv4MappedToIPv6)
-                {
-                    using (UdpClient udpClient = new UdpClient())
-                    {
-                        try
-                        {
-                            udpClient.Connect(destination.MapToIPv4(), NETWORK_TEST_PORT);
-                            localAddress = (udpClient.Client.LocalEndPoint as IPEndPoint)?.Address;
-                        }
-                        catch (SocketException)
-                        {
-                            // Socket exception is thrown if the OS cannot find a suitable entry in the routing table.
-                        }
-                    }
+                    // Cached item is valid, return the value
+                    return cachedAddress.Item1;
                 }
                 else
                 {
-                    using (UdpClient udpClient = new UdpClient(AddressFamily.InterNetworkV6))
-                    {
-                        try
-                        {
-                            udpClient.Connect(destination, NETWORK_TEST_PORT);
-                            localAddress = (udpClient.Client.LocalEndPoint as IPEndPoint)?.Address;
-                        }
-                        catch (SocketException)
-                        {
-                            // Socket exception is thrown if the OS cannot find a suitable entry in the routing table.
-                        }
-                    }
-
+                    m_localAddressTable.TryRemove(destination, out _);
                 }
-
-                if (localAddress != null)
-                {
-                    m_localAddressTable.TryAdd(destination, new Tuple<IPAddress, DateTime>(localAddress, DateTime.Now));
-                }
-
-                return localAddress;
             }
+
+            IPAddress localAddress = null;
+
+            if (destination.AddressFamily == AddressFamily.InterNetwork || destination.IsIPv4MappedToIPv6)
+            {
+                using (UdpClient udpClient = new UdpClient())
+                {
+                    try
+                    {
+                        udpClient.Connect(destination.MapToIPv4(), NETWORK_TEST_PORT);
+                        localAddress = (udpClient.Client.LocalEndPoint as IPEndPoint)?.Address;
+                    }
+                    catch (SocketException)
+                    {
+                        // Socket exception is thrown if the OS cannot find a suitable entry in the routing table.
+                    }
+                }
+            }
+            else
+            {
+                using (UdpClient udpClient = new UdpClient(AddressFamily.InterNetworkV6))
+                {
+                    try
+                    {
+                        udpClient.Connect(destination, NETWORK_TEST_PORT);
+                        localAddress = (udpClient.Client.LocalEndPoint as IPEndPoint)?.Address;
+                    }
+                    catch (SocketException)
+                    {
+                        // Socket exception is thrown if the OS cannot find a suitable entry in the routing table.
+                    }
+                }
+
+            }
+
+            if (localAddress != null)
+            {
+                m_localAddressTable.TryAdd(destination, new Tuple<IPAddress, DateTime>(localAddress, DateTime.Now));
+            }
+
+            return localAddress;
         }
 
         /// <summary>
