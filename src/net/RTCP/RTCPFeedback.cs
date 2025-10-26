@@ -29,6 +29,7 @@
 using System;
 using System.Buffers.Binary;
 using Microsoft.Extensions.Logging;
+using Org.BouncyCastle.Bcpg;
 using SIPSorcery.Sys;
 
 namespace SIPSorcery.Net
@@ -105,7 +106,21 @@ namespace SIPSorcery.Net
         public byte NumSsrcs = 0;
         public byte BitrateExp = 0; // Bitrate Expoent
         public uint BitrateMantissa = 0; //Bits per Second
-        public uint FeedbackSSRC; // Packet Sender
+        public uint FeedbackSSRC //Packet sender
+        {
+            get => FeedbackSSRCs == null || FeedbackSSRCs.Length == 0 ? 0 : FeedbackSSRCs[0];
+
+            set
+            {
+                if (FeedbackSSRCs == null || FeedbackSSRCs?.Length == 0)
+                {
+                    FeedbackSSRCs = new uint[Math.Max((int)NumSsrcs, 1)];
+                }
+                FeedbackSSRCs[0] = value;
+            }
+        }
+
+        public uint[] FeedbackSSRCs = [0]; // Packet Senders
 
         public RTCPFeedback(uint senderSsrc, uint mediaSsrc, RTCPFeedbackTypesEnum feedbackMessageType, ushort sequenceNo, ushort bitMask)
         {
@@ -213,9 +228,20 @@ namespace SIPSorcery.Net
                         
                         currentCounter += 3;
 
-                        FeedbackSSRC = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(currentCounter));
-                    }
+                        FeedbackSSRCs = new uint[NumSsrcs];
+                        for (int i = 0; i < NumSsrcs; i++)
+                        {
+                            FeedbackSSRCs[i] = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(currentCounter));
+                            if (i < FeedbackSSRCs.Length - 1)
+                            {
+                                currentCounter += 4;
+                            }
+                        }
 
+                        //var additionalFeedbacksIgnored = NumSsrcs - 1;
+                        //currentCounter += additionalFeedbacksIgnored * 4;
+                        SENDER_PAYLOAD_SIZE = currentCounter;
+                    }
                     break;
 
                     //default:
@@ -324,14 +350,12 @@ namespace SIPSorcery.Net
 
                         currentCounter += 3;
 
-                        if (BitConverter.IsLittleEndian)
+                        int off = currentCounter;
+                        for (int i = 0; i < FeedbackSSRCs.Length; i++, off += 4)
                         {
-                            Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(FeedbackSSRC)), 0, buffer, currentCounter, 4);
+                            BinaryPrimitives.WriteUInt32BigEndian(buffer.AsSpan(off, 4), FeedbackSSRCs[i]);
                         }
-                        else
-                        {
-                            Buffer.BlockCopy(BitConverter.GetBytes(FeedbackSSRC), 0, buffer, currentCounter, 4);
-                        }
+                        currentCounter = off;
                     }
 
                     break;
