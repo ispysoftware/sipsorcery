@@ -25,7 +25,7 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <TargetFrameworks>net9.0</TargetFrameworks>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <LangVersion>13.0</LangVersion>
     <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
     <NoWarn>$(NoWarn);SYSLIB0050;IDE0011</NoWarn>

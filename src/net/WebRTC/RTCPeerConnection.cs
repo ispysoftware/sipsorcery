@@ -1044,17 +1044,14 @@ namespace SIPSorcery.Net
                     }
                 }
 
-                //if (answerSdp.Media.Any(x => x.Media == SDPMediaTypesEnum.audio))
-                //{
-                //    var audioAnnouncement = answerSdp.Media.Where(x => x.Media == SDPMediaTypesEnum.audio).Single();
-                //    audioAnnouncement.IceRole = IceRole;
-                //}
+                var answerRole = (IceRole == IceRolesEnum.active)
+                    ? IceRolesEnum.active
+                    : IceRolesEnum.passive;
 
-                //if (answerSdp.Media.Any(x => x.Media == SDPMediaTypesEnum.video))
-                //{
-                //    var videoAnnouncement = answerSdp.Media.Where(x => x.Media == SDPMediaTypesEnum.video).Single();
-                //    videoAnnouncement.IceRole = IceRole;
-                //}
+                foreach (var ann in answerSdp.Media)
+                {
+                    ann.IceRole = answerRole;
+                }
 
                 RTCSessionDescriptionInit initDescription = new RTCSessionDescriptionInit
                 {
