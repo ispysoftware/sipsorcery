@@ -269,7 +269,7 @@ namespace SIPSorcery.Sys
 
             // Buffer to read in plain text blocks.
             byte[] fileBuffer = new byte[fileStream.Length];
-            fileStream.Read(fileBuffer, 0, (int)fileStream.Length);
+            fileStream.ReadExactly(fileBuffer, 0, (int)fileStream.Length);
             fileStream.Close();
 
             byte[] overallHash = shaM.ComputeHash(fileBuffer);
