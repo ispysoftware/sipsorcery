@@ -333,6 +333,7 @@ namespace SIPSorcery.Net
             _crypto = new BcTlsCrypto();
             _dataChannels = new RTCDataChannelCollection(useEvenIds: () => _dtlsHandle.IsClient);
 
+
             if (_configuration != null &&
                _configuration.iceTransportPolicy == RTCIceTransportPolicy.relay &&
                _configuration.iceServers?.Count == 0)
@@ -344,8 +345,9 @@ namespace SIPSorcery.Net
             {
                 _configuration = configuration;
 
-                _configuration.iceTransportPolicy = RTCIceTransportPolicy.relay;
-                _configuration.iceServers = _configuration.iceServers.Where(p => p.urls.StartsWith("turns")).ToList();
+                //testing turns:
+                //_configuration.iceTransportPolicy = RTCIceTransportPolicy.relay;
+                //_configuration.iceServers = _configuration.iceServers.Where(p => p.urls.StartsWith("turns")).ToList();
 
                 if (!InitializeCertificates2(configuration))
                 {

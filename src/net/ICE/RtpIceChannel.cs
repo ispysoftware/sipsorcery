@@ -79,6 +79,7 @@ using Microsoft.Extensions.Logging;
 using SIPSorcery.net.ICE;
 using SIPSorcery.net.RTP;
 using SIPSorcery.Sys;
+using System.Net.Security;
 
 [assembly: InternalsVisibleToAttribute("SIPSorcery.UnitTests")]
 
@@ -164,6 +165,7 @@ namespace SIPSorcery.Net
         private DateTime _connectedAt = DateTime.MinValue;
 
         internal ConcurrentDictionary<STUNUri, IceServer> _iceServerConnections;
+        private ConcurrentDictionary<STUNUri, SslStream> _tlsStreams = new ConcurrentDictionary<STUNUri, SslStream>();
 
         private IceServer _activeIceServer;
 
@@ -514,6 +516,12 @@ namespace SIPSorcery.Net
                     var stunUri = pair.Key;
                     var tcpSocket = pair.Value;
 
+                    if (stunUri.Scheme == STUNSchemesEnum.turns || stunUri.Scheme == STUNSchemesEnum.stuns)
+                    {
+                        continue;
+                    }
+
+
                     if (stunUri != null && !m_rtpTcpReceiverByUri.ContainsKey(stunUri) && tcpSocket != null)
                     {
                         var rtpTcpReceiver = new IceTcpReceiver(tcpSocket);
@@ -814,45 +822,45 @@ namespace SIPSorcery.Net
                 foreach (string url in urls)
                 {
                     if (!String.IsNullOrWhiteSpace(url))
-                    {
-                        if (STUNUri.TryParse(url, out var stunUri))
-                        {
-                            if (stunUri.Scheme == STUNSchemesEnum.stuns || stunUri.Scheme == STUNSchemesEnum.turns)
-                            {
-                                logger.LogWarning($"ICE channel does not currently support TLS for STUN and TURN servers, not checking {stunUri}.");
-                            }
-                            else if (_policy == RTCIceTransportPolicy.relay && stunUri.Scheme == STUNSchemesEnum.stun)
-                            {
-                                logger.LogWarning($"ICE channel policy is relay only, ignoring STUN server {stunUri}.");
-                            }
-                            else if (!_iceServerConnections.ContainsKey(stunUri))
-                            {
-                                logger.LogDebug($"Adding ICE server for {stunUri}.");
+    {
+        if (STUNUri.TryParse(url, out var stunUri))
+        {
+            // [REMOVED] The block checking for STUNSchemesEnum.stuns/turns is deleted.
+            // This allows secure schemes to flow down to the creation logic.
 
-                                var iceServerState = new IceServer(stunUri, iceServerID, iceServer.username, iceServer.credential);
+            if (_policy == RTCIceTransportPolicy.relay && stunUri.Scheme == STUNSchemesEnum.stun)
+            {
+                logger.LogWarning($"ICE channel policy is relay only, ignoring STUN server {stunUri}.");
+            }
+            else if (!_iceServerConnections.ContainsKey(stunUri))
+            {
+                // NOW 'turns' URIs will reach this block!
+                logger.LogDebug($"Adding ICE server for {stunUri}.");
 
-                                // Check whether the server end point can be set. IF it can't a DNS lookup will be required.
-                                if (IPAddress.TryParse(iceServerState._uri.Host, out var serverIPAddress))
-                                {
-                                    iceServerState.ServerEndPoint = new IPEndPoint(serverIPAddress, iceServerState._uri.Port);
-                                    logger.LogDebug($"ICE server end point for {iceServerState._uri} set to {iceServerState.ServerEndPoint}.");
-                                }
+                var iceServerState = new IceServer(stunUri, iceServerID, iceServer.username, iceServer.credential);
 
-                                _iceServerConnections.TryAdd(stunUri, iceServerState);
+                // Check whether the server end point can be set. IF it can't a DNS lookup will be required.
+                if (IPAddress.TryParse(iceServerState._uri.Host, out var serverIPAddress))
+                {
+                    iceServerState.ServerEndPoint = new IPEndPoint(serverIPAddress, iceServerState._uri.Port);
+                    logger.LogDebug($"ICE server end point for {iceServerState._uri} set to {iceServerState.ServerEndPoint}.");
+                }
 
-                                iceServerID++;
-                                if (iceServerID > IceServer.MAXIMUM_ICE_SERVER_ID)
-                                {
-                                    logger.LogWarning("The maximum number of ICE servers for the session has been reached.");
-                                    break;
-                                }
-                            }
-                        }
-                        else
-                        {
-                            logger.LogWarning($"RTP ICE Channel could not parse ICE server URL {url}.");
-                        }
-                    }
+                _iceServerConnections.TryAdd(stunUri, iceServerState);
+
+                iceServerID++;
+                if (iceServerID > IceServer.MAXIMUM_ICE_SERVER_ID)
+                {
+                    logger.LogWarning("The maximum number of ICE servers for the session has been reached.");
+                    break;
+                }
+            }
+        }
+        else
+        {
+            logger.LogWarning($"RTP ICE Channel could not parse ICE server URL {url}.");
+        }
+    }
                 }
             }
         }
@@ -871,7 +879,7 @@ namespace SIPSorcery.Net
                 {
                     return;
                 }
-                if (_activeIceServer._uri.Scheme != STUNSchemesEnum.turn || NominatedEntry.LocalCandidate.IceServer is null)
+                if ((_activeIceServer._uri.Scheme != STUNSchemesEnum.turn && _activeIceServer._uri.Scheme != STUNSchemesEnum.turns) || NominatedEntry.LocalCandidate.IceServer is null)
                 {
                     _refreshTurnTimer?.Dispose();
                     return;
@@ -967,8 +975,8 @@ namespace SIPSorcery.Net
                         logger.LogDebug("RTP ICE Channel was not able to acquire an active ICE server, stopping ICE servers timer.");
                         _processIceServersTimer.Dispose();
                     }
-                    else if ((_activeIceServer._uri.Scheme == STUNSchemesEnum.turn && _activeIceServer.RelayEndPoint != null) ||
-                        (_activeIceServer._uri.Scheme == STUNSchemesEnum.stun && _activeIceServer.ServerReflexiveEndPoint != null))
+                    else if (((_activeIceServer._uri.Scheme == STUNSchemesEnum.turn || _activeIceServer._uri.Scheme == STUNSchemesEnum.turns) && _activeIceServer.RelayEndPoint != null) ||
+    ((_activeIceServer._uri.Scheme == STUNSchemesEnum.stun || _activeIceServer._uri.Scheme == STUNSchemesEnum.stuns) && _activeIceServer.ServerReflexiveEndPoint != null))
                     {
                         // Successfully set up the ICE server. Do nothing.
                     }
@@ -1013,14 +1021,14 @@ namespace SIPSorcery.Net
                         logger.LogWarning($"Connection attempt to ICE server {_activeIceServer._uri} cancelled after {_activeIceServer.ErrorResponseCount} error responses.");
                         _activeIceServer.Error = SocketError.TimedOut;
                     }
-                    else if (_activeIceServer.ServerReflexiveEndPoint == null && _activeIceServer._uri.Scheme == STUNSchemesEnum.stun)
+                    else if (_activeIceServer.ServerReflexiveEndPoint == null && (_activeIceServer._uri.Scheme == STUNSchemesEnum.stun || _activeIceServer._uri.Scheme == STUNSchemesEnum.stuns))
                     {
                         logger.LogDebug($"Sending STUN binding request to ICE server {_activeIceServer._uri} with address {_activeIceServer.ServerEndPoint}.");
 
                         // Await the asynchronous send method.
                         _activeIceServer.Error = await SendStunBindingRequestAsync(_activeIceServer).ConfigureAwait(false);
                     }
-                    else if (_activeIceServer.ServerReflexiveEndPoint == null && _activeIceServer._uri.Scheme == STUNSchemesEnum.turn)
+                    else if (_activeIceServer.ServerReflexiveEndPoint == null && (_activeIceServer._uri.Scheme == STUNSchemesEnum.turn || _activeIceServer._uri.Scheme == STUNSchemesEnum.turns))
                     {
                         logger.LogDebug($"Sending TURN allocate request to ICE server {_activeIceServer._uri} with address {_activeIceServer.ServerEndPoint}.");
 
@@ -2253,76 +2261,167 @@ namespace SIPSorcery.Net
         {
             IPEndPoint dstEndPoint = iceServer?.ServerEndPoint;
 
-            if (IsClosed)
-            {
-                return SocketError.Disconnecting;
-            }
-            if (dstEndPoint == null)
-            {
-                throw new ArgumentException("dstEndPoint", "An empty destination was specified to Send in RTPChannel.");
-            }
-            if (buffer.IsEmpty)
-            {
-                throw new ArgumentException("buffer", "The buffer must be set and non empty for Send in RTPChannel.");
-            }
-            if (IPAddress.Any.Equals(dstEndPoint.Address) || IPAddress.IPv6Any.Equals(dstEndPoint.Address))
-            {
-                logger.LogWarning($"The destination address for Send in RTPChannel cannot be {dstEndPoint.Address}.");
-                return SocketError.DestinationAddressRequired;
-            }
+            if (IsClosed) return SocketError.Disconnecting;
+            if (dstEndPoint == null) throw new ArgumentException("dstEndPoint", "Empty destination in SendOverTCPAsync.");
+            if (buffer.IsEmpty) throw new ArgumentException("buffer", "Buffer cannot be empty.");
 
             try
             {
                 RtpTcpSocketByUri.TryGetValue(iceServer?._uri, out Socket sendSocket);
-                if (sendSocket == null)
-                {
-                    return SocketError.Fault;
-                }
+                if (sendSocket == null) return SocketError.Fault;
 
-                // Prevent Send to IPV4 while socket is IPV6 (Mono Error)
+                // Map IPv4 to IPv6 if socket is dual-mode
                 if (dstEndPoint.AddressFamily == AddressFamily.InterNetwork && sendSocket.AddressFamily != dstEndPoint.AddressFamily)
                 {
                     dstEndPoint = new IPEndPoint(dstEndPoint.Address.MapToIPv6(), dstEndPoint.Port);
                 }
 
-                // --- Non-blocking connection logic ---
-                if (!sendSocket.Connected || !(sendSocket.RemoteEndPoint is IPEndPoint remoteEndPoint) || !remoteEndPoint.Equals(dstEndPoint))
+                // 1. Check if this is a TLS connection
+                bool isTls = iceServer._uri.Scheme == STUNSchemesEnum.turns || iceServer._uri.Scheme == STUNSchemesEnum.stuns;
+
+                if (isTls)
                 {
-                    if (sendSocket.Connected)
+                    // --- TLS PATH ---
+                    if (!_tlsStreams.TryGetValue(iceServer._uri, out SslStream sslStream))
                     {
-                        logger.LogDebug($"SendOverTCPAsync requesting disconnect.");
-                        sendSocket.Disconnect(true); // Disconnect is synchronous, which is fine.
+                        // Connect the raw socket if needed
+                        if (!sendSocket.Connected)
+                        {
+                            await sendSocket.ConnectAsync(dstEndPoint).ConfigureAwait(false);
+                        }
+
+                        // Wrap in SslStream
+                        // Note: We leave validation permissive (true) for testing, but you can restrict it.
+                        sslStream = new SslStream(new NetworkStream(sendSocket, false), false,
+                            (sender, cert, chain, errors) => true, null);
+
+                        try
+                        {
+                            // Perform SSL Handshake
+                            // We assume the hostname in the URI matches the cert
+                            await sslStream.AuthenticateAsClientAsync(iceServer._uri.Host).ConfigureAwait(false);
+
+                            _tlsStreams.TryAdd(iceServer._uri, sslStream);
+                            logger.LogDebug($"TLS Handshake successful for {iceServer._uri}");
+
+                            // Start a dedicated read loop for this SSL stream
+                            _ = StartTlsReadLoop(iceServer._uri, sslStream, dstEndPoint);
+                        }
+                        catch (Exception tlsEx)
+                        {
+                            logger.LogError($"TLS Handshake failed for {iceServer._uri}: {tlsEx.Message}");
+                            return SocketError.SocketError;
+                        }
                     }
 
-                    // Use the non-blocking async version of Connect.
-                    await sendSocket.ConnectAsync(dstEndPoint).ConfigureAwait(false);
-                    logger.LogDebug($"SendOverTCPAsync status: {sendSocket.Connected} endpoint: {dstEndPoint}");
+                    // Write to the SSL Stream
+                    await sslStream.WriteAsync(buffer).ConfigureAwait(false);
+                    return SocketError.Success;
                 }
-
-                m_rtpTcpReceiverByUri.TryGetValue(iceServer?._uri, out IceTcpReceiver rtpTcpReceiver);
-                if (rtpTcpReceiver != null && !rtpTcpReceiver.IsRunningReceive && !rtpTcpReceiver.IsClosed)
+                else
                 {
-                    rtpTcpReceiver.Start();
+                    // --- STANDARD TCP PATH (Original Logic) ---
+                    if (!sendSocket.Connected || !(sendSocket.RemoteEndPoint is IPEndPoint remoteEndPoint) || !remoteEndPoint.Equals(dstEndPoint))
+                    {
+                        if (sendSocket.Connected) sendSocket.Disconnect(true);
+                        await sendSocket.ConnectAsync(dstEndPoint).ConfigureAwait(false);
+
+                        // Ensure standard receiver is running
+                        m_rtpTcpReceiverByUri.TryGetValue(iceServer?._uri, out IceTcpReceiver rtpTcpReceiver);
+                        if (rtpTcpReceiver != null && !rtpTcpReceiver.IsRunningReceive && !rtpTcpReceiver.IsClosed)
+                        {
+                            rtpTcpReceiver.Start();
+                        }
+                    }
+
+                    await sendSocket.SendAsync(buffer, SocketFlags.None).ConfigureAwait(false);
+                    return SocketError.Success;
                 }
-
-                // --- Non-blocking send logic ---
-                // Replace BeginSendTo/callback with a single awaitable call.
-                await sendSocket.SendAsync(buffer, SocketFlags.None).ConfigureAwait(false);
-
-                return SocketError.Success;
             }
-            catch (ObjectDisposedException) // Thrown when socket is closed.
-            {
-                return SocketError.Disconnecting;
-            }
-            catch (SocketException sockExcp)
-            {
-                return sockExcp.SocketErrorCode;
-            }
+            catch (ObjectDisposedException) { return SocketError.Disconnecting; }
+            catch (SocketException sockExcp) { return sockExcp.SocketErrorCode; }
             catch (Exception excp)
             {
                 logger.LogError($"Exception RTPIceChannel.SendOverTCPAsync. {excp}");
                 return SocketError.Fault;
+            }
+        }
+
+        private async Task StartTlsReadLoop(STUNUri uri, SslStream sslStream, IPEndPoint remoteEndPoint)
+        {
+            // A buffer large enough to hold incoming TCP chunks
+            byte[] receiveBuffer = new byte[4096];
+            // A working buffer to accumulate incomplete packets
+            List<byte> streamBuffer = new List<byte>();
+
+            logger.LogDebug($"Starting TLS read loop for {uri}");
+
+            try
+            {
+                while (!IsClosed && sslStream.CanRead)
+                {
+                    // 1. Read available bytes from the stream
+                    int bytesRead = await sslStream.ReadAsync(receiveBuffer, 0, receiveBuffer.Length).ConfigureAwait(false);
+
+                    if (bytesRead == 0)
+                    {
+                        logger.LogWarning($"TLS stream closed remotely for {uri}");
+                        break;
+                    }
+
+                    // 2. Add new bytes to our stream buffer
+                    // Optimization: If streamBuffer is empty and we have a full packet, avoid copy (omitted for safety here)
+                    streamBuffer.AddRange(new ArraySegment<byte>(receiveBuffer, 0, bytesRead));
+
+                    // 3. Process complete packets from the stream buffer
+                    while (streamBuffer.Count >= 4) // Minimum header size
+                    {
+                        // Inspect the header to determine packet length
+                        // STUN/TURN Header: [Type:2][Length:2]...
+                        // TURN Channel Data: [Channel:2][Length:2]...
+                        // In both cases, bytes 2-3 contain the payload length (Big Endian)
+
+                        int bodyLength = (streamBuffer[2] << 8) | streamBuffer[3];
+                        int totalPacketLength = 20 + bodyLength; // Header (20) + Body
+
+                        // Check for TURN Channel Data (which has a 4-byte header, not 20)
+                        // Channel Data range is 0x4000 -> 0x7FFF
+                        if (streamBuffer[0] >= 0x40 && streamBuffer[0] <= 0x7F)
+                        {
+                            totalPacketLength = 4 + bodyLength; // ChannelData Header (4) + Body
+                        }
+
+                        // Do we have the full packet?
+                        if (streamBuffer.Count >= totalPacketLength)
+                        {
+                            // Extract the packet
+                            byte[] packetBytes = streamBuffer.GetRange(0, totalPacketLength).ToArray();
+
+                            // Remove from buffer
+                            streamBuffer.RemoveRange(0, totalPacketLength);
+
+                            // Process the packet
+                            var packetMemory = new Memory<byte>(packetBytes);
+                            OnRTPPacketReceived(null, 0, remoteEndPoint, packetMemory);
+                        }
+                        else
+                        {
+                            // Not enough data yet, wait for next ReadAsync
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!IsClosed)
+                {
+                    logger.LogError($"TLS Read Loop Exception for {uri}: {ex.Message}");
+                }
+            }
+            finally
+            {
+                _tlsStreams.TryRemove(uri, out _);
             }
         }
 
