@@ -347,7 +347,8 @@ namespace SIPSorcery.Net
 
                 //testing turns:
                 //_configuration.iceTransportPolicy = RTCIceTransportPolicy.relay;
-                //_configuration.iceServers = _configuration.iceServers.Where(p => p.urls.StartsWith("turns")).ToList();
+                //_configuration.iceServers = _configuration.iceServers.Where(p => p.urls.StartsWith("turns:")).ToList();
+                //_configuration.iceServers = _configuration.iceServers.Where(p => p.urls.StartsWith("turn:")).ToList();
 
                 if (!InitializeCertificates2(configuration))
                 {

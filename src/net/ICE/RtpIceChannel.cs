@@ -67,8 +67,10 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -79,7 +81,6 @@ using Microsoft.Extensions.Logging;
 using SIPSorcery.net.ICE;
 using SIPSorcery.net.RTP;
 using SIPSorcery.Sys;
-using System.Net.Security;
 
 [assembly: InternalsVisibleToAttribute("SIPSorcery.UnitTests")]
 
@@ -2411,6 +2412,11 @@ namespace SIPSorcery.Net
                         }
                     }
                 }
+            }
+            catch (IOException ex) when (ex.InnerException is SocketException sockEx && sockEx.SocketErrorCode == SocketError.ConnectionReset)
+            {
+                // This is normal: The server killed the idle connection because we likely connected via UDP instead.
+                logger.LogDebug($"TLS connection dropped by remote server (ConnectionReset): {uri}");
             }
             catch (Exception ex)
             {
