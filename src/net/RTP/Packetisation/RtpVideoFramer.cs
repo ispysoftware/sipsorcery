@@ -16,6 +16,7 @@
 //-----------------------------------------------------------------------------
 
 using System;
+using System.Buffers.Binary;
 using System.Linq;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.net.RTP.Packetisation;
@@ -157,34 +158,22 @@ namespace SIPSorcery.Net
         public static byte[] CreateLowQualityRtpJpegHeader(uint fragmentOffset, int quality, int width, int height)
         {
             byte[] rtpJpegHeader = new byte[8] { 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00 };
+            Span<byte> span = rtpJpegHeader.AsSpan();
 
-            // Byte 0: Type specific
-            //http://tools.ietf.org/search/rfc2435#section-3.1.1
+            // Bytes 1 to 3: Three byte fragment offset (Big-Endian)
+            // We write fragmentOffset as a 32-bit uint to a temp space and copy the trailing 3 bytes
+            Span<byte> temp = stackalloc byte[4];
+            BinaryPrimitives.WriteUInt32BigEndian(temp, fragmentOffset);
+            temp.Slice(1, 3).CopyTo(span.Slice(1));
 
-            // Bytes 1 to 3: Three byte fragment offset
-            //http://tools.ietf.org/search/rfc2435#section-3.1.2
+            // Byte 5: Q
+            span[5] = (byte)quality;
 
-            if (BitConverter.IsLittleEndian)
-            {
-                fragmentOffset = NetConvert.DoReverseEndian(fragmentOffset);
-            }
+            // Byte 6: Width
+            span[6] = (byte)(width / 8);
 
-            byte[] offsetBytes = BitConverter.GetBytes(fragmentOffset);
-            rtpJpegHeader[1] = offsetBytes[2];
-            rtpJpegHeader[2] = offsetBytes[1];
-            rtpJpegHeader[3] = offsetBytes[0];
-
-            // Byte 4: JPEG Type.
-            //http://tools.ietf.org/search/rfc2435#section-3.1.3
-
-            //Byte 5: http://tools.ietf.org/search/rfc2435#section-3.1.4 (Q)
-            rtpJpegHeader[5] = (byte)quality;
-
-            // Byte 6: http://tools.ietf.org/search/rfc2435#section-3.1.5 (Width)
-            rtpJpegHeader[6] = (byte)(width / 8);
-
-            // Byte 7: http://tools.ietf.org/search/rfc2435#section-3.1.6 (Height)
-            rtpJpegHeader[7] = (byte)(height / 8);
+            // Byte 7: Height
+            span[7] = (byte)(height / 8);
 
             return rtpJpegHeader;
         }

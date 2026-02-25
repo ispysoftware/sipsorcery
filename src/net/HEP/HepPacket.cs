@@ -32,6 +32,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Buffers.Binary;
 using SIPSorcery.SIP;
 using SIPSorcery.Sys;
 
@@ -82,19 +83,14 @@ namespace SIPSorcery.Net
         /// <returns>A buffer that contains the serialised chunk EXCEPT for the payload.</returns>
         private static byte[] InitBuffer(ChunkTypeEnum chunkType, ushort length)
         {
+            // Allocate the actual buffer once
             byte[] buf = new byte[length];
-            if (BitConverter.IsLittleEndian)
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(GENERIC_VENDOR_ID)), 0, buf, 0, 2);
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian((ushort)chunkType)), 0, buf, 2, 2);
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(length)), 0, buf, 4, 2);
-            }
-            else
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(GENERIC_VENDOR_ID), 0, buf, 0, 2);
-                Buffer.BlockCopy(BitConverter.GetBytes((ushort)chunkType), 0, buf, 2, 2);
-                Buffer.BlockCopy(BitConverter.GetBytes(length), 0, buf, 4, 2);
-            }
+
+            // Write directly into the buffer in network byte order (Big-Endian)
+            BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(0), (ushort)GENERIC_VENDOR_ID);
+            BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(2), (ushort)chunkType);
+            BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(4), length);
+
             return buf;
         }
 
@@ -115,14 +111,7 @@ namespace SIPSorcery.Net
         {
             byte[] buf = InitBuffer(chunkType, MINIMUM_CHUNK_LENGTH + 2);
 
-            if (BitConverter.IsLittleEndian)
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(val)), 0, buf, MINIMUM_CHUNK_LENGTH, 2);
-            }
-            else
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(val), 0, buf, MINIMUM_CHUNK_LENGTH, 2);
-            }
+            BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(MINIMUM_CHUNK_LENGTH), val);
             return buf;
         }
 
@@ -133,14 +122,7 @@ namespace SIPSorcery.Net
         {
             byte[] buf = InitBuffer(chunkType, MINIMUM_CHUNK_LENGTH + 4);
 
-            if (BitConverter.IsLittleEndian)
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(val)), 0, buf, MINIMUM_CHUNK_LENGTH, 4);
-            }
-            else
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(val), 0, buf, MINIMUM_CHUNK_LENGTH, 4);
-            }
+            BinaryPrimitives.WriteUInt32BigEndian(buf.AsSpan(MINIMUM_CHUNK_LENGTH), val);
             return buf;
         }
 
@@ -306,15 +288,7 @@ namespace SIPSorcery.Net
             Buffer.BlockCopy(payloadBuffer, 0, packetBuffer, offset, payloadLength);
             offset += payloadLength;
 
-            // Length
-            if (BitConverter.IsLittleEndian)
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian((ushort)offset)), 0, packetBuffer, 4, 2);
-            }
-            else
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes((ushort)offset), 0, packetBuffer, 4, 2);
-            }
+            BinaryPrimitives.WriteUInt16BigEndian(packetBuffer.AsSpan(4), (ushort)offset);
 
             return packetBuffer.Take(offset).ToArray();
         }

@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------------
 // Filename: RTCPSDesReport.cs
 //
 // Description: RTCP Source Description (SDES) report as defined in RFC3550.
@@ -149,14 +149,7 @@ namespace SIPSorcery.Net
             Buffer.BlockCopy(Header.GetBytes(), 0, buffer, 0, RTCPHeader.HEADER_BYTES_LENGTH);
             int payloadIndex = RTCPHeader.HEADER_BYTES_LENGTH;
 
-            if (BitConverter.IsLittleEndian)
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(NetConvert.DoReverseEndian(SSRC)), 0, buffer, payloadIndex, 4);
-            }
-            else
-            {
-                Buffer.BlockCopy(BitConverter.GetBytes(SSRC), 0, buffer, payloadIndex, 4);
-            }
+            BinaryPrimitives.WriteUInt32BigEndian(buffer.AsSpan(payloadIndex), SSRC);
 
             buffer[payloadIndex + 4] = CNAME_ID;
             buffer[payloadIndex + 5] = (byte)cnameBytes.Length;
