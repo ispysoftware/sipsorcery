@@ -173,7 +173,7 @@ namespace SIPSorcery.Net
                 throw new ApplicationException("The STUN header did not begin with 0x00.");
             }
 
-            if (bufferSegment != null && bufferSegment.Length > 0 && bufferSegment.Length >= STUN_HEADER_LENGTH)
+            if (bufferSegment.Length > 0 && bufferSegment.Length >= STUN_HEADER_LENGTH)
             {
                 STUNHeader stunHeader = new STUNHeader();
 
