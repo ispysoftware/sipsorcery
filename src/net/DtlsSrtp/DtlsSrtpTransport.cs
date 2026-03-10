@@ -536,7 +536,7 @@ namespace SIPSorcery.Net
             {
                 if (_isClosed)
                 {
-                    throw new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.NotConnected);
+                    return DTLS_RECEIVE_ERROR_CODE;
                 }
                 // The timeout for the handshake applies from when it started rather than
                 // for each individual receive..
