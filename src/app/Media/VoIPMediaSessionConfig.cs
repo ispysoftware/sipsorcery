@@ -30,7 +30,7 @@ namespace SIPSorcery.Media
         
         public RtpSecureMediaOptionEnum RtpSecureMediaOption { get; set; }
 
-        public VideoTestPatternSource TestPatternSource { get; set; }
+        //public VideoTestPatternSource TestPatternSource { get; set; }
 
         public PortRange RtpPortRange { get; set; }
 

@@ -1,6 +1,19 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <Compile Remove="app\Media\Sources\**" />
+    <Compile Remove="net\DtlsSrtp_new\**" />
+    <Compile Remove="net\DtlsSrtp_\**" />
+    <EmbeddedResource Remove="app\Media\Sources\**" />
+    <EmbeddedResource Remove="net\DtlsSrtp_new\**" />
+    <EmbeddedResource Remove="net\DtlsSrtp_\**" />
+    <None Remove="app\Media\Sources\**" />
+    <None Remove="net\DtlsSrtp_new\**" />
+    <None Remove="net\DtlsSrtp_\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="app\Media\AudioSendOnlyMediaSession.cs" />
     <Compile Remove="net\RTSP\RTSPClient.cs" />
     <Compile Remove="net\RTSP\RTSPConnection.cs" />
     <Compile Remove="net\RTSP\RTSPServer.cs" />
