@@ -75,6 +75,12 @@ namespace SIPSorcery.net.RTP
 
         public int Index = -1;
 
+        /// <summary>
+        /// Tracks the global order in which this stream was added to the session,
+        /// across all media types. Used to preserve m-line ordering per RFC 3264 §8.
+        /// </summary>
+        public int MediaInsertionOrder = -1;
+
         #region EVENTS
 
         /// <summary>

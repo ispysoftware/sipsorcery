@@ -641,6 +641,8 @@ namespace SIPSorcery.Net
 
             while (!_closed.HasOccurred)
             {
+                _senderMre.Reset();
+
                 var outstandingBytes = (uint)_outstandingBytes;
                 // DateTime.Now calls have been a tiny bit expensive in the past so get a small saving by only
                 // calling once per loop.
@@ -752,8 +754,6 @@ namespace SIPSorcery.Net
                         }
                     }
                 }
-
-                _senderMre.Reset();
 
                 int wait = GetSendWaitMilliseconds();
                 _senderMre.Wait(wait);
