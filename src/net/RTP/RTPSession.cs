@@ -1178,10 +1178,11 @@ namespace SIPSorcery.Net
                     {
                         capabilities = SDPAudioVideoMediaFormat.GetCompatibleFormats(currentMediaStream.RemoteTrack?.Capabilities, currentMediaStream.LocalTrack?.Capabilities);
 
-                        // When handling an offer, keep local codec priority for the answer.
-                        // When handling an answer, use the remote answer's negotiated priority.
+                        // The offerer gets to set the codec priority.
+                        // When receiving an offer: the REMOTE party is the offerer, so their Capabilities are the priority key.
+                        // When receiving an answer: LOCAL is the offerer (we sent the offer), so our Capabilities are the priority key.
                         SDPAudioVideoMediaFormat.SortMediaCapability(capabilities,
-                            sdpType == SdpType.offer ? currentMediaStream.LocalTrack?.Capabilities : currentMediaStream.RemoteTrack?.Capabilities);
+                            sdpType == SdpType.offer ? currentMediaStream.RemoteTrack?.Capabilities : currentMediaStream.LocalTrack?.Capabilities);
 
                         currentMediaStream.LocalTrack.Capabilities = capabilities;
                         currentMediaStream.RemoteTrack.Capabilities = capabilities;
