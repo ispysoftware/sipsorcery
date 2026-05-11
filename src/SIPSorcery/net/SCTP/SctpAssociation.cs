@@ -537,6 +537,7 @@ namespace SIPSorcery.Net
 
                         case var ct when ct == SctpChunkType.SHUTDOWN && State == SctpAssociationState.Established:
                             // TODO: Check outstanding data chunks.
+                            _dataSender?.Close();
                             var shutdownAck = new SctpChunk(SctpChunkType.SHUTDOWN_ACK);
                             SendChunk(shutdownAck);
                             SetState(SctpAssociationState.ShutdownAckSent);
