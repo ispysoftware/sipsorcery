@@ -69,6 +69,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -435,6 +436,7 @@ namespace SIPSorcery.Net
         internal IceServerResolver _iceServerResolver = new IceServerResolver();
 
         //internal ConcurrentDictionary<STUNUri, IceServer> _iceServerConnections;
+        private ConcurrentDictionary<STUNUri, SslStream> _tlsStreams = new ConcurrentDictionary<STUNUri, SslStream>();
 
         private IceServer _activeIceServer;
 
@@ -773,6 +775,11 @@ namespace SIPSorcery.Net
                     var stunUri = pair.Key;
                     var tcpSocket = pair.Value;
 
+                    if (stunUri.Scheme == STUNSchemesEnum.turns || stunUri.Scheme == STUNSchemesEnum.stuns)
+                    {
+                        continue;
+                    }
+
                     if (stunUri != null && !m_rtpTcpReceiverByUri.ContainsKey(stunUri) && tcpSocket != null)
                     {
                         var rtpTcpReceiver = new IceTcpReceiver(tcpSocket);
@@ -1069,7 +1076,7 @@ namespace SIPSorcery.Net
                 {
                     return;
                 }
-                if (_activeIceServer._uri.Scheme != STUNSchemesEnum.turn || NominatedEntry.LocalCandidate.IceServer is null)
+                if ((_activeIceServer._uri.Scheme != STUNSchemesEnum.turn && _activeIceServer._uri.Scheme != STUNSchemesEnum.turns) || NominatedEntry.LocalCandidate.IceServer is null)
                 {
                     _refreshTurnTimer?.Dispose();
                     return;
@@ -1159,8 +1166,8 @@ namespace SIPSorcery.Net
                         logger.LogDebug("RTP ICE Channel was not able to acquire an active ICE server, stopping ICE servers timer.");
                         _processIceServersTimer.Dispose();
                     }
-                    else if ((_activeIceServer._uri.Scheme == STUNSchemesEnum.turn && _activeIceServer.RelayEndPoint != null) ||
-                        (_activeIceServer._uri.Scheme == STUNSchemesEnum.stun && _activeIceServer.ServerReflexiveEndPoint != null))
+                    else if (((_activeIceServer._uri.Scheme == STUNSchemesEnum.turn || _activeIceServer._uri.Scheme == STUNSchemesEnum.turns) && _activeIceServer.RelayEndPoint != null) ||
+    ((_activeIceServer._uri.Scheme == STUNSchemesEnum.stun || _activeIceServer._uri.Scheme == STUNSchemesEnum.stuns) && _activeIceServer.ServerReflexiveEndPoint != null))
                     {
                         // Successfully set up the ICE server. Do nothing.
                     }
@@ -1189,13 +1196,13 @@ namespace SIPSorcery.Net
                         _activeIceServer.Error = SocketError.TimedOut;
                     }
                     // Send STUN binding request.
-                    else if (_activeIceServer.ServerReflexiveEndPoint == null && _activeIceServer._uri.Scheme == STUNSchemesEnum.stun)
+                    else if (_activeIceServer.ServerReflexiveEndPoint == null && (_activeIceServer._uri.Scheme == STUNSchemesEnum.stun || _activeIceServer._uri.Scheme == STUNSchemesEnum.stuns))
                     {
                         logger.LogDebug("Sending STUN binding request to ICE server {Uri} with address {EndPoint}.", _activeIceServer._uri, _activeIceServer.ServerEndPoint);
                         _activeIceServer.Error = SendStunBindingRequest(_activeIceServer);
                     }
                     // Send TURN binding request.
-                    else if (_activeIceServer.ServerReflexiveEndPoint == null && _activeIceServer._uri.Scheme == STUNSchemesEnum.turn)
+                    else if (_activeIceServer.ServerReflexiveEndPoint == null && (_activeIceServer._uri.Scheme == STUNSchemesEnum.turn || _activeIceServer._uri.Scheme == STUNSchemesEnum.turns))
                     {
                         logger.LogDebug("Sending TURN allocate request to ICE server {Uri} with address {EndPoint}.", _activeIceServer._uri, _activeIceServer.ServerEndPoint);
                         _activeIceServer.Error = SendTurnAllocateRequest(_activeIceServer);
@@ -2376,6 +2383,7 @@ namespace SIPSorcery.Net
         protected virtual SocketError SendOverTCP(IceServer iceServer, byte[] buffer)
         {
             IPEndPoint dstEndPoint = iceServer?.ServerEndPoint;
+
             if (IsClosed)
             {
                 return SocketError.Disconnecting;
@@ -2417,27 +2425,70 @@ namespace SIPSorcery.Net
                         return e1.Port == e2.Port && e1.Address.Equals(e2.Address);
                     };
 
-                    if (!sendSocket.Connected || !(sendSocket.RemoteEndPoint is IPEndPoint) || !equals(sendSocket.RemoteEndPoint as IPEndPoint, dstEndPoint))
+                    bool isTls = iceServer._uri.Scheme == STUNSchemesEnum.turns || iceServer._uri.Scheme == STUNSchemesEnum.stuns;
+                    if (isTls)
                     {
-                        if (sendSocket.Connected)
+                        // --- TLS PATH ---
+                        if (!_tlsStreams.TryGetValue(iceServer._uri, out SslStream sslStream))
                         {
-                            logger.LogDebug("SendOverTCP request disconnect.");
-                            sendSocket.Disconnect(true);
+                            // Connect the raw socket if needed
+                            if (!sendSocket.Connected)
+                            {
+                                sendSocket.Connect(dstEndPoint);
+                            }
+
+                            // Wrap in SslStream
+                            // Note: We leave validation permissive (true) for testing, but you can restrict it.
+                            sslStream = new SslStream(new NetworkStream(sendSocket, false), false,
+                                (sender, cert, chain, errors) => true, null);
+
+                            try
+                            {
+                                // Perform SSL Handshake
+                                // We assume the hostname in the URI matches the cert
+                                sslStream.AuthenticateAsClient(iceServer._uri.Host);
+
+                                _tlsStreams.TryAdd(iceServer._uri, sslStream);
+                                logger.LogDebug($"TLS Handshake successful for {iceServer._uri}");
+
+                                // Start a dedicated read loop for this SSL stream
+                                _ = StartTlsReadLoop(iceServer._uri, sslStream, dstEndPoint);
+                            }
+                            catch (Exception tlsEx)
+                            {
+                                logger.LogError($"TLS Handshake failed for {iceServer._uri}: {tlsEx.Message}");
+                                return SocketError.SocketError;
+                            }
                         }
-                        sendSocket.Connect(dstEndPoint);
 
-                        logger.LogDebug("SendOverTCP status: {Status} endpoint: {EndPoint}", sendSocket.Connected, dstEndPoint);
+                        // Write to the SSL Stream
+                        sslStream.Write(buffer);
+                        return SocketError.Success;
                     }
-
-                    //Fix ReceiveFrom logic if any previous exception happens
-                    m_rtpTcpReceiverByUri.TryGetValue(iceServer?._uri, out IceTcpReceiver rtpTcpReceiver);
-                    if (rtpTcpReceiver != null && !rtpTcpReceiver.IsRunningReceive && !rtpTcpReceiver.IsClosed)
+                    else
                     {
-                        rtpTcpReceiver.BeginReceiveFrom();
-                    }
+                        if (!sendSocket.Connected || !(sendSocket.RemoteEndPoint is IPEndPoint) || !equals(sendSocket.RemoteEndPoint as IPEndPoint, dstEndPoint))
+                        {
+                            if (sendSocket.Connected)
+                            {
+                                logger.LogDebug("SendOverTCP request disconnect.");
+                                sendSocket.Disconnect(true);
+                            }
+                            sendSocket.Connect(dstEndPoint);
 
-                    sendSocket.BeginSendTo(buffer, 0, buffer.Length, SocketFlags.None, dstEndPoint, EndSendToTCP, sendSocket);
-                    return SocketError.Success;
+                            logger.LogDebug("SendOverTCP status: {Status} endpoint: {EndPoint}", sendSocket.Connected, dstEndPoint);
+                        }
+
+                        //Fix ReceiveFrom logic if any previous exception happens
+                        m_rtpTcpReceiverByUri.TryGetValue(iceServer?._uri, out IceTcpReceiver rtpTcpReceiver);
+                        if (rtpTcpReceiver != null && !rtpTcpReceiver.IsRunningReceive && !rtpTcpReceiver.IsClosed)
+                        {
+                            rtpTcpReceiver.BeginReceiveFrom();
+                        }
+
+                        sendSocket.BeginSendTo(buffer, 0, buffer.Length, SocketFlags.None, dstEndPoint, EndSendToTCP, sendSocket);
+                        return SocketError.Success;
+                    }
                 }
                 catch (ObjectDisposedException) // Thrown when socket is closed. Can be safely ignored.
                 {
@@ -2452,6 +2503,84 @@ namespace SIPSorcery.Net
                     logger.LogError(excp, "Exception RTPIceChannel.SendOverTCP. {ErrorMessage}", excp.Message);
                     return SocketError.Fault;
                 }
+            }
+        }
+
+        private async Task StartTlsReadLoop(STUNUri uri, SslStream sslStream, IPEndPoint remoteEndPoint)
+        {
+            // A buffer large enough to hold incoming TCP chunks
+            byte[] receiveBuffer = new byte[4096];
+            // A working buffer to accumulate incomplete packets
+            List<byte> streamBuffer = new List<byte>();
+
+            logger.LogDebug($"Starting TLS read loop for {uri}");
+
+            try
+            {
+                while (!IsClosed && sslStream.CanRead)
+                {
+                    // 1. Read available bytes from the stream
+                    int bytesRead = await sslStream.ReadAsync(receiveBuffer, 0, receiveBuffer.Length).ConfigureAwait(false);
+
+                    if (bytesRead == 0)
+                    {
+                        logger.LogWarning($"TLS stream closed remotely for {uri}");
+                        break;
+                    }
+
+                    // 2. Add new bytes to our stream buffer
+                    // Optimization: If streamBuffer is empty and we have a full packet, avoid copy (omitted for safety here)
+                    streamBuffer.AddRange(new ArraySegment<byte>(receiveBuffer, 0, bytesRead));
+
+                    // 3. Process complete packets from the stream buffer
+                    while (streamBuffer.Count >= 4) // Minimum header size
+                    {
+                        // Inspect the header to determine packet length
+                        // STUN/TURN Header: [Type:2][Length:2]...
+                        // TURN Channel Data: [Channel:2][Length:2]...
+                        // In both cases, bytes 2-3 contain the payload length (Big Endian)
+
+                        int bodyLength = (streamBuffer[2] << 8) | streamBuffer[3];
+                        int totalPacketLength = 20 + bodyLength; // Header (20) + Body
+
+                        // Check for TURN Channel Data (which has a 4-byte header, not 20)
+                        // Channel Data range is 0x4000 -> 0x7FFF
+                        if (streamBuffer[0] >= 0x40 && streamBuffer[0] <= 0x7F)
+                        {
+                            totalPacketLength = 4 + bodyLength; // ChannelData Header (4) + Body
+                        }
+
+                        // Do we have the full packet?
+                        if (streamBuffer.Count >= totalPacketLength)
+                        {
+                            // Extract the packet
+                            byte[] packetBytes = streamBuffer.GetRange(0, totalPacketLength).ToArray();
+
+                            // Remove from buffer
+                            streamBuffer.RemoveRange(0, totalPacketLength);
+
+                            // Process the packet
+                            OnRTPPacketReceived(null, 0, remoteEndPoint, packetBytes);
+                        }
+                        else
+                        {
+                            // Not enough data yet, wait for next ReadAsync
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!IsClosed)
+                {
+                    logger.LogError($"TLS Read Loop Exception for {uri}: {ex.Message}");
+                }
+            }
+            finally
+            {
+                _tlsStreams.TryRemove(uri, out _);
+
             }
         }
 

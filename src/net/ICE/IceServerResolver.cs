@@ -69,8 +69,7 @@ public class IceServerResolver
                 }
 
                 // Filter out TLS or policy excluded entries
-                if (stunUri.Scheme is STUNSchemesEnum.stuns or STUNSchemesEnum.turns ||
-                    (policy == RTCIceTransportPolicy.relay && stunUri.Scheme == STUNSchemesEnum.stun))
+                if (policy == RTCIceTransportPolicy.relay && stunUri.Scheme == STUNSchemesEnum.stun)
                 {
                     logger.LogWarning("{caller} ignoring ICE server {stunUri} (scheme {scheme})", nameof(IceServerResolver), stunUri, stunUri.Scheme);
                     continue;
