@@ -16,6 +16,7 @@
 // =============================================================================
 
 using System;
+using System.Data.SqlTypes;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -65,17 +66,11 @@ namespace SIPSorcery.Sys
             var iters = int.Parse(salt.Substring(0, i), System.Globalization.NumberStyles.HexNumber);
             salt = salt.Substring(i + 1);
             byte[] key = null;
+            byte[] saltBytes = Convert.FromBase64String(salt);
 
 #if NET8_0_OR_GREATER
             // Use the updated constructor for .NET 8.0 or later
-            using (var pbkdf2 = new Rfc2898DeriveBytes(
-                Encoding.UTF8.GetBytes(value),
-                Convert.FromBase64String(salt),
-                iters,
-                HashAlgorithmName.SHA256))
-            {
-                key = pbkdf2.GetBytes(24);
-            }
+            key = Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(value), saltBytes, iters, System.Security.Cryptography.HashAlgorithmName.SHA256, 24);
 #else
     // Fallback to the existing approach for .NET Framework and .NET Standard
     using (var pbkdf2 = new Rfc2898DeriveBytes(Encoding.UTF8.GetBytes(value), Convert.FromBase64String(salt), iters))
