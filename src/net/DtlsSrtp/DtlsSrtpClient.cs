@@ -122,11 +122,14 @@ namespace SIPSorcery.Net
 
             if (clientSrtpData == null)
             {
-                SecureRandom random = new SecureRandom();
+                //SecureRandom random = new SecureRandom();
+                //int[] protectionProfiles = { SrtpProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_80 };
+                //byte[] mki = new byte[(SrtpParameters.SRTP_AES128_CM_HMAC_SHA1_80.GetCipherKeyLength() + SrtpParameters.SRTP_AES128_CM_HMAC_SHA1_80.GetCipherSaltLength()) / 8];
+                //random.NextBytes(mki); // Reusing our secure random for generating the key.
+                //this.clientSrtpData = new UseSrtpData(protectionProfiles, mki);
                 int[] protectionProfiles = { SrtpProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_80 };
-                byte[] mki = new byte[(SrtpParameters.SRTP_AES128_CM_HMAC_SHA1_80.GetCipherKeyLength() + SrtpParameters.SRTP_AES128_CM_HMAC_SHA1_80.GetCipherSaltLength()) / 8];
-                random.NextBytes(mki); // Reusing our secure random for generating the key.
-                this.clientSrtpData = new UseSrtpData(protectionProfiles, mki);
+                // Note: the WebRTC spec states Master Key Identifier (MKI) MUST NOT be used, see https://datatracker.ietf.org/doc/html/rfc8827#name-communications-security.
+                this.clientSrtpData = new UseSrtpData(protectionProfiles, []);
             }
             else
             {
