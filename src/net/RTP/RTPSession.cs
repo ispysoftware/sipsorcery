@@ -2852,19 +2852,26 @@ namespace SIPSorcery.Net
         /// Sends the RTCP report to the remote call party. (on the primary one)
         /// </summary>
         /// <param name="report">RTCP report to send.</param>
-        public void SendRtcpReportAsync(SDPMediaTypesEnum mediaType, RTCPCompoundPacket report)
+        public async void SendRtcpReportAsync(SDPMediaTypesEnum mediaType, RTCPCompoundPacket report)
         {
-            if (mediaType == SDPMediaTypesEnum.audio)
+            try
             {
-                AudioStream.SendRtcpReport(report);
+                if (mediaType == SDPMediaTypesEnum.audio)
+                {
+                    await AudioStream.SendRtcpReport(report).ConfigureAwait(false);
+                }
+                else if (mediaType == SDPMediaTypesEnum.video)
+                {
+                    await VideoStream.SendRtcpReport(report).ConfigureAwait(false);
+                }
+                else if (mediaType == SDPMediaTypesEnum.text)
+                {
+                    await TextStream.SendRtcpReport(report).ConfigureAwait(false);
+                }
             }
-            else if (mediaType == SDPMediaTypesEnum.video)
+            catch (Exception ex)
             {
-                VideoStream.SendRtcpReport(report);
-            }
-            else if (mediaType == SDPMediaTypesEnum.text)
-            {
-                TextStream.SendRtcpReport(report);
+                logger.LogError(ex, "SendRtcpReportAsync failed.");
             }
         }
 

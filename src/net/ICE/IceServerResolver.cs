@@ -117,7 +117,7 @@ public class IceServerResolver
 
         if (_iceServers.ContainsKey(key))
         {
-            _iceServers[key].DnsLookupSentAt = DateTime.UtcNow;
+            _iceServers[key].DnsLookupSentAt = DateTime.Now;
         }
 
         logger.LogDebug("{caller} starting DNS lookup for ICE server {Uri}", nameof(IceServerResolver), key);
