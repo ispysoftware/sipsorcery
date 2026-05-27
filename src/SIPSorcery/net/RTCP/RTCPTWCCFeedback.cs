@@ -163,6 +163,21 @@ namespace SIPSorcery.Net
             Header = new RTCPHeader(packet);
             int offset = RTCPHeader.HEADER_BYTES_LENGTH;
 
+            // The RTCP header's Length field (in 32-bit words minus one) is the
+            // authoritative size of this sub-packet. Use it as the upper bound for
+            // all subsequent reads rather than packet.Length, because the buffer
+            // may contain additional RTCP sub-packets in a compound datagram or
+            // unrelated trailing data. Without this bound a corrupt or hostile
+            // PacketStatusCount can drive the parser to walk past the real end
+            // of the TWCC payload (see issue: ArgumentException "Packet truncated
+            // during status chunk parsing. Expected N more statuses").
+            int declaredEnd = (Header.Length + 1) * 4;
+            if (declaredEnd > packet.Length)
+            {
+                throw new ArgumentException(
+                    $"TWCC feedback packet header claims {declaredEnd} bytes but only {packet.Length} available.");
+            }
+
             // Parse sender and media SSRCs
             SenderSSRC = ReadUInt32(packet, ref offset);
             MediaSSRC = ReadUInt32(packet, ref offset);
@@ -172,18 +187,18 @@ namespace SIPSorcery.Net
             PacketStatusCount = ReadUInt16(packet, ref offset);
 
             // Parse Reference Time and Feedback Packet Count
-            ReferenceTime = ParseReferenceTime(packet, ref offset, out byte fbCount);
+            ReferenceTime = ParseReferenceTime(packet, ref offset, out byte fbCount, declaredEnd);
             FeedbackPacketCount = fbCount;
 
-            // Parse status chunks
-            var statusSymbols = ParseStatusChunks(packet, ref offset);
+            // Parse status chunks (bounded by the RTCP header's declared length)
+            var statusSymbols = ParseStatusChunks(packet, ref offset, declaredEnd);
 
-            // Parse delta values with validation
-            var (deltaValues, lastOffset) = ParseDeltaValues(packet, offset, statusSymbols);
+            // Parse delta values with validation (also bounded by declaredEnd)
+            var (deltaValues, lastOffset) = ParseDeltaValues(packet, offset, statusSymbols, declaredEnd);
 
             // Build final packet status list
             BuildPacketStatusList(statusSymbols, deltaValues);
-            
+
         }
 
         private void ParseRunLengthChunk(ushort chunk, List<TWCCPacketStatusType> statusSymbols, ref int remainingStatuses)
@@ -233,9 +248,9 @@ namespace SIPSorcery.Net
             }
         }
 
-        private uint ParseReferenceTime(byte[] packet, ref int offset, out byte fbCount)
+        private uint ParseReferenceTime(byte[] packet, ref int offset, out byte fbCount, int declaredEnd)
         {
-            if (offset + 4 > packet.Length)
+            if (offset + 4 > declaredEnd)
             {
                 throw new ArgumentException("Packet truncated at reference time.");
             }
@@ -247,14 +262,14 @@ namespace SIPSorcery.Net
             return (uint)((b1 << 16) | (b2 << 8) | b3);
         }
 
-        private List<TWCCPacketStatusType> ParseStatusChunks(byte[] packet, ref int offset)
+        private List<TWCCPacketStatusType> ParseStatusChunks(byte[] packet, ref int offset, int declaredEnd)
         {
             var statusSymbols = new List<TWCCPacketStatusType>();
             int remainingStatuses = PacketStatusCount;
 
             while (remainingStatuses > 0)
             {
-                if (offset + 2 > packet.Length)
+                if (offset + 2 > declaredEnd)
                 {
                     throw new ArgumentException($"Packet truncated during status chunk parsing. Expected {remainingStatuses} more statuses.");
                 }
@@ -304,7 +319,7 @@ namespace SIPSorcery.Net
             remainingStatuses -= symbolsToRead;
         }
 
-        private (List<int> deltaValues, int lastOffset) ParseDeltaValues(byte[] packet, int offset, List<TWCCPacketStatusType> statusSymbols)
+        private (List<int> deltaValues, int lastOffset) ParseDeltaValues(byte[] packet, int offset, List<TWCCPacketStatusType> statusSymbols, int declaredEnd)
         {
             var deltaValues = new List<int>();
             int expectedDeltaCount = statusSymbols.Count(s =>
@@ -319,9 +334,10 @@ namespace SIPSorcery.Net
                     continue;
                 }
 
-                // Check if we have enough data for the delta
+                // Check if we have enough data for the delta (bounded by the RTCP
+                // header's declared length, not the raw buffer length).
                 int deltaSize = status == TWCCPacketStatusType.ReceivedSmallDelta ? 1 : 2;
-                if (offset + deltaSize > packet.Length)
+                if (offset + deltaSize > declaredEnd)
                 {
                     // Instead of throwing, we'll add a special value to indicate truncation
                     deltaValues.Add(int.MinValue);

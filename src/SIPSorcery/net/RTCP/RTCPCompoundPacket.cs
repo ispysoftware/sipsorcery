@@ -104,8 +104,24 @@ namespace SIPSorcery.Net
                             var typ = RTCPHeader.ParseFeedbackType(buffer);
                             switch (typ) {
                                 case RTCPFeedbackTypesEnum.TWCC:
-                                    TWCCFeedback = new RTCPTWCCFeedback(buffer);
-                                    int twccFeedbackLength = (TWCCFeedback.Header.Length + 1) * 4;
+                                    // Read the declared sub-packet length from the RTCP header up front
+                                    // so the compound-packet loop can always advance, even if TWCC
+                                    // parsing throws on a malformed/hostile payload. Without this,
+                                    // a single bad TWCC feedback would discard the entire compound
+                                    // datagram (losing any SR/RR/SDES bundled with it) and surface as
+                                    // an unhandled ArgumentException out of the constructor.
+                                    var twccHeader = new RTCPHeader(buffer);
+                                    int twccFeedbackLength = (twccHeader.Length + 1) * 4;
+                                    try
+                                    {
+                                        TWCCFeedback = new RTCPTWCCFeedback(buffer);
+                                    }
+                                    catch (Exception twccExcp)
+                                    {
+                                        logger.LogWarning(twccExcp,
+                                            "Malformed RTCP TWCC feedback packet (length {Length} bytes) skipped: {Message}",
+                                            twccFeedbackLength, twccExcp.Message);
+                                    }
                                     offset += twccFeedbackLength;
                                     break;
                                 default:

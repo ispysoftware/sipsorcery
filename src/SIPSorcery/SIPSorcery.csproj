@@ -9,10 +9,6 @@
   <ItemGroup>
     <None Remove="core\SIPEvents\Dialog\EventDialogSchema.xsd" />
     <None Remove="core\SIPEvents\Presence\PIDFSchema.xsd" />
-    <None Remove="media\Macroform_-_Simplicity.raw" />
-    <None Remove="media\testpattern.i420" />
-    <EmbeddedResource Include="media\Macroform_-_Simplicity.raw" />
-    <EmbeddedResource Include="media\testpattern.i420" />
     <None Include="icon.png" Pack="true" PackagePath="" />
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
