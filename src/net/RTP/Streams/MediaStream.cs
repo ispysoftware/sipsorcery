@@ -73,6 +73,14 @@ namespace SIPSorcery.net.RTP
         /// </summary>
         private ushort _twccPacketCount = 0;
 
+        /// <summary>
+        /// Records the wire-send time for every TWCC-tagged outgoing RTP packet, so
+        /// a send-side bandwidth estimator (e.g. AdvancedTWCCBitrateController) can
+        /// correlate browser TWCC feedback against the moment each packet was sent.
+        /// Stays empty unless the TWCC header extension is being applied to this stream.
+        /// </summary>
+        public TwccSentPacketTracker TwccSentPackets { get; } = new TwccSentPacketTracker();
+
         public int Index = -1;
 
         /// <summary>
@@ -587,7 +595,14 @@ namespace SIPSorcery.net.RTP
                             //case TransportWideCCExtension.RTP_HEADER_EXTENSION_URI_ALT:
                             if (ext is TransportWideCCExtension transportWideCCExtension)
                             {
-                                transportWideCCExtension.Set(_twccPacketCount++);
+                                var seq = _twccPacketCount++;
+                                transportWideCCExtension.Set(seq);
+                                // Capture the wire-send time for this seqnum so the bitrate
+                                // controller can compute send_delta when TWCC feedback arrives.
+                                // Stopwatch is monotonic — immune to NTP steps and DST shifts,
+                                // which matters because we'll be subtracting timestamps from
+                                // potentially seconds-old packets.
+                                TwccSentPackets.RecordSend(seq, Stopwatch.GetTimestamp());
                             }
                             break;
 
