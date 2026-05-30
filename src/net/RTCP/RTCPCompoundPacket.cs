@@ -280,7 +280,13 @@ namespace SIPSorcery.Net
                                 case RTCPFeedbackTypesEnum.TWCC:
                                     {
                                         rtcpCompoundPacket.TWCCFeedback = new RTCPTWCCFeedback(buffer);
-                                        int twccFeedbackLength = (rtcpCompoundPacket.TWCCFeedback != null) ? rtcpCompoundPacket.TWCCFeedback.GetBytes().Length : Int32.MaxValue;
+                                        // Advance by the on-wire length from the parsed RTCP header
+                                        // (length = 32-bit words minus one, incl. header + padding).
+                                        // Using the parsed header avoids re-serializing via GetBytes(),
+                                        // whose chunk packing/padding need not match the received bytes.
+                                        int twccFeedbackLength = (rtcpCompoundPacket.TWCCFeedback != null)
+                                            ? (rtcpCompoundPacket.TWCCFeedback.Header.Length + 1) * 4
+                                            : Int32.MaxValue;
                                         offset += twccFeedbackLength;
                                     }
                                     break;
