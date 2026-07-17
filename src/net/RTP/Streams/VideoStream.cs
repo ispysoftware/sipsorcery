@@ -153,7 +153,6 @@ namespace SIPSorcery.Net
                 byte[] payload = nal.ToArray();
                 int markerBit = isLastNal ? 1 : 0;
 
-                SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
                 await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
             }
             else
@@ -266,7 +265,6 @@ namespace SIPSorcery.Net
                     // Set the marker bit only for the very last packet of the frame.
                     int markerBit = remainingBuffer.IsEmpty ? 1 : 0;
 
-                    SetRtpHeaderExtensionValue(TransportWideCCExtension.RTP_HEADER_EXTENSION_URI, null);
                     // Await the non-blocking send operation.
                     await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
                 }

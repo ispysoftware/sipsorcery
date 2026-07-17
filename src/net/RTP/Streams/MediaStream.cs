@@ -485,6 +485,19 @@ namespace SIPSorcery.net.RTP
                         {
                             continue;
                         }
+                        // Every RTP packet on a TWCC-negotiated stream must carry a unique
+                        // transport-wide seqnum with a matching send-time record, so the
+                        // counter is advanced here — the single choke point every packet
+                        // passes through — rather than in each packetiser. (Packetiser-side
+                        // calls to SetRtpHeaderExtensionValue historically missed the H264
+                        // FU-A fragment path, so all fragments of a large NAL shared one
+                        // stale seqnum and the TWCC bandwidth estimator ran on garbage.)
+                        if (ext is TransportWideCCExtension twccExt)
+                        {
+                            var twccSeq = _twccPacketCount++;
+                            twccExt.Set(twccSeq);
+                            TwccSentPackets.RecordSend(twccSeq, Stopwatch.GetTimestamp());
+                        }
                         int bytesWritten = ext.Marshal(packetSpan.Slice(currentExtensionCursor));
                         currentExtensionCursor += bytesWritten;
                     }
@@ -593,17 +606,11 @@ namespace SIPSorcery.net.RTP
                             break;
                         case TransportWideCCExtension.RTP_HEADER_EXTENSION_URI:
                             //case TransportWideCCExtension.RTP_HEADER_EXTENSION_URI_ALT:
-                            if (ext is TransportWideCCExtension transportWideCCExtension)
-                            {
-                                var seq = _twccPacketCount++;
-                                transportWideCCExtension.Set(seq);
-                                // Capture the wire-send time for this seqnum so the bitrate
-                                // controller can compute send_delta when TWCC feedback arrives.
-                                // Stopwatch is monotonic — immune to NTP steps and DST shifts,
-                                // which matters because we'll be subtracting timestamps from
-                                // potentially seconds-old packets.
-                                TwccSentPackets.RecordSend(seq, Stopwatch.GetTimestamp());
-                            }
+                            // No-op: the TWCC seqnum is advanced per-packet inside
+                            // SendRtpRawAsync (the single choke point), so every RTP packet
+                            // — including H264 FU-A fragments — gets a unique seqnum and a
+                            // send-time record. Incrementing here as well would burn seqnums
+                            // without sending, which the receiver reports as phantom loss.
                             break;
 
 

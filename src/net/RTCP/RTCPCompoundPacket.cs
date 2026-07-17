@@ -41,6 +41,14 @@ namespace SIPSorcery.Net
         public RTCPFeedback Feedback { get; set; }
         public RTCPTWCCFeedback TWCCFeedback { get; set; }
 
+        /// <summary>
+        /// All TWCC feedback messages in this compound packet, in wire order. Browsers
+        /// (Chrome in particular) routinely pack several TWCC feedback messages into one
+        /// compound RTCP packet; <see cref="TWCCFeedback"/> only ever holds the last one
+        /// parsed, so consumers that want every feedback interval must use this list.
+        /// </summary>
+        public List<RTCPTWCCFeedback> TWCCFeedbacks { get; } = new List<RTCPTWCCFeedback>();
+
         protected internal RTCPCompoundPacket()
         {
         }
@@ -106,6 +114,7 @@ namespace SIPSorcery.Net
                             {
                                 case RTCPFeedbackTypesEnum.TWCC:
                                     TWCCFeedback = new RTCPTWCCFeedback(buffer);
+                                    TWCCFeedbacks.Add(TWCCFeedback);
                                     int twccFeedbackLength = (TWCCFeedback.Header.Length + 1) * 4;
                                     offset += twccFeedbackLength;
                                     break;
@@ -280,6 +289,7 @@ namespace SIPSorcery.Net
                                 case RTCPFeedbackTypesEnum.TWCC:
                                     {
                                         rtcpCompoundPacket.TWCCFeedback = new RTCPTWCCFeedback(buffer);
+                                        rtcpCompoundPacket.TWCCFeedbacks.Add(rtcpCompoundPacket.TWCCFeedback);
                                         // Advance by the on-wire length from the parsed RTCP header
                                         // (length = 32-bit words minus one, incl. header + padding).
                                         // Using the parsed header avoids re-serializing via GetBytes(),
