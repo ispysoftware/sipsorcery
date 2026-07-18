@@ -2455,6 +2455,24 @@ namespace SIPSorcery.Net
                     mediaStream.RtcpSession.ReportReceived(remoteEndPoint, rtcpPkt);
                     mediaStream.RaiseOnReceiveReportByIndex(remoteEndPoint, rtcpPkt);
                 }
+
+                // Service Generic NACKs with retransmissions. Resolved by the NACK's
+                // media SSRC (not the compound-packet stream match, which keys off the
+                // sender SSRC). Fired on the thread pool — the resend path performs
+                // SRTP + socket sends and must not stall the UDP receive loop.
+                if (rtcpPkt.NackFeedbacks.Count > 0)
+                {
+                    foreach (var nackFeedback in rtcpPkt.NackFeedbacks)
+                    {
+                        var nackStream = VideoStreamList.Find(x => x.LocalTrack?.Ssrc == nackFeedback.MediaSSRC) ?? VideoStream;
+                        if (nackStream != null)
+                        {
+                            var nack = nackFeedback;
+                            var stream = nackStream;
+                            _ = Task.Run(() => stream.ProcessNackAsync(nack));
+                        }
+                    }
+                }
                 else if (rtcpPkt.ReceiverReport?.SSRC == 0) // Typically RTCP_RR_NOSTREAM_SSRC is 0
                 {
                     // Ignore empty Receiver Reports.

@@ -101,6 +101,13 @@ namespace SIPSorcery.Net
             get
             {
                 yield return "transport-cc";
+                // Generic NACK: without this in the answer, browsers never send
+                // retransmission requests and every lost packet costs a PLI +
+                // full keyframe instead of a one-RTT repair.
+                yield return "nack";
+                // PLI negotiated explicitly (browsers were sending it anyway, but
+                // advertising it is the spec-correct contract for the recovery path).
+                yield return "nack pli";
                 //yield return "goog-remb";
             }
         }

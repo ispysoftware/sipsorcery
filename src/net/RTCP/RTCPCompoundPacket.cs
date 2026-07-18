@@ -49,6 +49,13 @@ namespace SIPSorcery.Net
         /// </summary>
         public List<RTCPTWCCFeedback> TWCCFeedbacks { get; } = new List<RTCPTWCCFeedback>();
 
+        /// <summary>
+        /// All Generic NACK feedback messages in this compound packet, fully parsed
+        /// (every FCI entry — <see cref="RTCPFeedback"/> only reads the first pair).
+        /// Used by the sender side to service retransmission requests.
+        /// </summary>
+        public List<RTCPNackFeedback> NackFeedbacks { get; } = new List<RTCPNackFeedback>();
+
         protected internal RTCPCompoundPacket()
         {
         }
@@ -108,7 +115,6 @@ namespace SIPSorcery.Net
                             offset += byeLength;
                             break;
                         case (byte)RTCPReportTypesEnum.RTPFB:
-                            // TODO: Interpret Generic RTP feedback reports.
                             var typ = RTCPHeader.ParseFeedbackType(buffer);
                             switch (typ)
                             {
@@ -118,22 +124,26 @@ namespace SIPSorcery.Net
                                     int twccFeedbackLength = (TWCCFeedback.Header.Length + 1) * 4;
                                     offset += twccFeedbackLength;
                                     break;
+                                case RTCPFeedbackTypesEnum.NACK:
+                                    var nack = new RTCPNackFeedback(buffer);
+                                    NackFeedbacks.Add(nack);
+                                    // Keep the legacy single-pair view populated for existing consumers.
+                                    Feedback = new RTCPFeedback(buffer);
+                                    offset += (nack.Header.Length + 1) * 4;
+                                    break;
                                 default:
                                     Feedback = new RTCPFeedback(buffer);
-                                    int rtpfbFeedbackLength = Feedback.GetBytes().Length;
-                                    offset += rtpfbFeedbackLength;
+                                    // Advance by the on-wire length from the parsed header — the
+                                    // re-serialized GetBytes() length assumes a single FCI entry
+                                    // and desynchronises the compound parse on longer messages.
+                                    offset += (Feedback.Header.Length + 1) * 4;
                                     break;
                             }
-                            //var rtpfbHeader = new RTCPHeader(buffer);
-                            //offset += rtpfbHeader.Length * 4 + 4;
                             break;
                         case (byte)RTCPReportTypesEnum.PSFB:
-                            // TODO: Interpret Payload specific feedback reports.
                             Feedback = new RTCPFeedback(buffer);
-                            int psfbFeedbackLength = (Feedback != null) ? Feedback.GetBytes().Length : Int32.MaxValue;
-                            offset += psfbFeedbackLength;
-                            //var psfbHeader = new RTCPHeader(buffer);
-                            //offset += psfbHeader.Length * 4 + 4;
+                            // On-wire length from the header for the same reason as RTPFB above.
+                            offset += (Feedback != null) ? (Feedback.Header.Length + 1) * 4 : Int32.MaxValue;
                             break;
                         default:
                             offset = Int32.MaxValue;
@@ -282,8 +292,21 @@ namespace SIPSorcery.Net
                                 default:
                                     {
                                         rtcpCompoundPacket.Feedback = new RTCPFeedback(buffer);
-                                        int rtpfbFeedbackLength = (rtcpCompoundPacket.Feedback != null) ? rtcpCompoundPacket.Feedback.GetBytes().Length : Int32.MaxValue;
-                                        offset += rtpfbFeedbackLength;
+                                        // On-wire length from the parsed header — re-serializing via
+                                        // GetBytes() assumes a single FCI entry and desynchronises
+                                        // the compound parse on longer messages.
+                                        offset += (rtcpCompoundPacket.Feedback != null)
+                                            ? (rtcpCompoundPacket.Feedback.Header.Length + 1) * 4
+                                            : Int32.MaxValue;
+                                    }
+                                    break;
+                                case RTCPFeedbackTypesEnum.NACK:
+                                    {
+                                        var nack = new RTCPNackFeedback(buffer);
+                                        rtcpCompoundPacket.NackFeedbacks.Add(nack);
+                                        // Keep the legacy single-pair view populated for existing consumers.
+                                        rtcpCompoundPacket.Feedback = new RTCPFeedback(buffer);
+                                        offset += (nack.Header.Length + 1) * 4;
                                     }
                                     break;
                                 case RTCPFeedbackTypesEnum.TWCC:
@@ -303,12 +326,11 @@ namespace SIPSorcery.Net
                             }
                             break;
                         case (byte)RTCPReportTypesEnum.PSFB:
-                            // TODO: Interpret Payload specific feedback reports.
                             rtcpCompoundPacket.Feedback = new RTCPFeedback(buffer);
-                            int psfbFeedbackLength = (rtcpCompoundPacket.Feedback != null) ? rtcpCompoundPacket.Feedback.GetBytes().Length : Int32.MaxValue;
-                            offset += psfbFeedbackLength;
-                            //var psfbHeader = new RTCPHeader(buffer);
-                            //offset += psfbHeader.Length * 4 + 4;
+                            // On-wire length from the header for the same reason as RTPFB above.
+                            offset += (rtcpCompoundPacket.Feedback != null)
+                                ? (rtcpCompoundPacket.Feedback.Header.Length + 1) * 4
+                                : Int32.MaxValue;
                             break;
                         default:
                             logger.LogWarning($"RTCPCompoundPacket did not recognise packet type ID {packetTypeID}.");

@@ -21,6 +21,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
@@ -69,9 +70,25 @@ namespace SIPSorcery.net.RTP
 
         protected bool _isClosed = false;
         /// <summary>
-        /// Used for keeping track of TWCC packets
+        /// Used for keeping track of TWCC packets. Int (not ushort) so it can be
+        /// advanced with Interlocked — the pacer drain loop and NACK retransmissions
+        /// send concurrently with each other; the on-wire value is the low 16 bits.
         /// </summary>
-        private ushort _twccPacketCount = 0;
+        private int _twccPacketCount = 0;
+
+        /// <summary>
+        /// Ring buffer of recently sent video packets used to answer RTCP Generic
+        /// NACKs with same-SSRC retransmissions. Created lazily on the first video
+        /// send; null for audio streams.
+        /// </summary>
+        private RtpRetransmitBuffer _retransmitBuffer;
+
+        /// <summary>
+        /// Optional pacer for outgoing video packets. Created by
+        /// <see cref="SetVideoPacingRate"/>; until then video sends go straight to
+        /// the wire (legacy behavior).
+        /// </summary>
+        internal PacedSender Pacer { get; private set; }
 
         /// <summary>
         /// Records the wire-send time for every TWCC-tagged outgoing RTP packet, so
@@ -164,6 +181,9 @@ namespace SIPSorcery.net.RTP
                     {
                         RtcpSession.OnTimeout -= RaiseOnTimeoutByIndex;
                     }
+
+                    _retransmitBuffer?.Dispose();
+                    Pacer?.Dispose();
                 }
 
                 //Clear previous buffer
@@ -433,6 +453,8 @@ namespace SIPSorcery.net.RTP
         /// A high-performance, asynchronous method to send an RTP packet.
         /// This is the correct version to use with an async-await compatible call stack
         /// (i.e., one initiated from a delegate that returns a Task).
+        /// Video packets route through the pacer when one is active (see
+        /// <see cref="SetVideoPacingRate"/>); everything else goes straight to the wire.
         /// </summary>
         protected async Task SendRtpRawAsync(ReadOnlyMemory<byte> payload, uint timestamp, int markerBit, int payloadType, bool checkDone, ushort? seqNum = null)
         {
@@ -441,6 +463,31 @@ namespace SIPSorcery.net.RTP
                 return;
             }
 
+            // Route fresh video packets through the pacer when active. Retransmissions
+            // (seqNum set) bypass it — they are small, urgent, and already rate-limited
+            // by the retransmit buffer.
+            if (seqNum == null && MediaType == SDPMediaTypesEnum.video)
+            {
+                var pacer = Pacer;
+                if (pacer != null && pacer.IsEnabled &&
+                    pacer.TryEnqueue(payload.Span, timestamp, markerBit, payloadType))
+                {
+                    return;
+                }
+            }
+
+            await SendRtpRawNowAsync(payload, timestamp, markerBit, payloadType, seqNum).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Builds and sends an RTP packet immediately: assigns the sequence number,
+        /// marshals header extensions (advancing the TWCC seqnum), stores video
+        /// originals in the retransmit buffer, SRTP-protects and hands to the socket.
+        /// Called from the pacer drain loop, from unpaced sends, and from NACK
+        /// retransmissions (with an explicit seqNum).
+        /// </summary>
+        private async Task SendRtpRawNowAsync(ReadOnlyMemory<byte> payload, uint timestamp, int markerBit, int payloadType, ushort? seqNum)
+        {
             var extensions = LocalTrack?.HeaderExtensions?.Values;
             bool hasExtensions = extensions?.Count > 0;
 
@@ -466,6 +513,15 @@ namespace SIPSorcery.net.RTP
                     // The extension flag will be set later if extensions are successfully written.
                     HeaderExtensionFlag = 0
                 };
+
+                // Buffer video originals (not retransmissions) so RTCP Generic NACKs can
+                // be answered with a same-SSRC resend. Stored plaintext, pre-SRTP — the
+                // resend re-enters this method and is protected fresh.
+                if (seqNum == null && MediaType == SDPMediaTypesEnum.video)
+                {
+                    (_retransmitBuffer ??= new RtpRetransmitBuffer())
+                        .Store(header.SequenceNumber, payload.Span, timestamp, markerBit, payloadType);
+                }
 
                 // A. Write the main 12-byte header. We will patch the extension bit later if needed.
                 cursor += header.WriteTo(packetSpan);
@@ -494,7 +550,9 @@ namespace SIPSorcery.net.RTP
                         // stale seqnum and the TWCC bandwidth estimator ran on garbage.)
                         if (ext is TransportWideCCExtension twccExt)
                         {
-                            var twccSeq = _twccPacketCount++;
+                            // Interlocked: the pacer drain loop and NACK retransmissions can
+                            // send concurrently. The wire value is the low 16 bits.
+                            var twccSeq = unchecked((ushort)Interlocked.Increment(ref _twccPacketCount));
                             twccExt.Set(twccSeq);
                             TwccSentPackets.RecordSend(twccSeq, Stopwatch.GetTimestamp());
                         }
@@ -573,6 +631,66 @@ namespace SIPSorcery.net.RTP
             // Await the call to the ReadOnlyMemory<byte> overload.
             // The explicit cast ensures the correct method is called, preventing infinite recursion.
             await SendRtpRawAsync((ReadOnlyMemory<byte>)data, timestamp, markerBit, payloadType, checkDone, seqNum).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Enables/updates pacing for outgoing video on this stream. Pass the MEDIA
+        /// target bitrate (bits/sec) — typically the bandwidth estimator's current
+        /// rate; the pacer drains at a multiple of it. Zero disables pacing.
+        /// No-op for non-video streams.
+        /// </summary>
+        public void SetVideoPacingRate(int targetBitsPerSecond)
+        {
+            if (MediaType != SDPMediaTypesEnum.video || _isClosed)
+            {
+                return;
+            }
+
+            if (Pacer == null)
+            {
+                Pacer = new PacedSender(pkt => SendRtpRawNowAsync(
+                    new ReadOnlyMemory<byte>(pkt.Payload, 0, pkt.Length),
+                    pkt.Timestamp, pkt.MarkerBit, pkt.PayloadType, null));
+            }
+            Pacer.SetTargetBitrate(targetBitsPerSecond);
+        }
+
+        /// <summary>
+        /// Approximate delay (ms) represented by packets waiting in the video pacer.
+        /// Zero when pacing is off or the queue is empty. Applications can treat a
+        /// sustained high value as a send-backlog signal and skip encoding frames.
+        /// </summary>
+        public double VideoSendBacklogMs => Pacer?.QueuedMilliseconds ?? 0;
+
+        /// <summary>
+        /// Services an RTCP Generic NACK by retransmitting any requested packets
+        /// still held in the retransmit buffer (same SSRC, original seqnum and
+        /// timestamp, fresh SRTP protection and TWCC seqnum). Requests for packets
+        /// that have aged out, crossed an SRTP rollover, or were resent within the
+        /// throttle window are silently skipped.
+        /// </summary>
+        public async Task ProcessNackAsync(RTCPNackFeedback nack)
+        {
+            var buffer = _retransmitBuffer;
+            if (buffer == null || nack == null || _isClosed)
+            {
+                return;
+            }
+
+            foreach (var seq in nack.GetSequenceNumbers())
+            {
+                if (buffer.TryGetForResend(seq, out var payload, out var length, out var ts, out var marker, out var pt))
+                {
+                    try
+                    {
+                        await SendRtpRawNowAsync(new ReadOnlyMemory<byte>(payload, 0, length), ts, marker, pt, seq).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(payload);
+                    }
+                }
+            }
         }
 
         /// <summary>
