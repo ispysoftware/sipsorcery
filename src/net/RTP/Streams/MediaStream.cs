@@ -663,6 +663,21 @@ namespace SIPSorcery.net.RTP
         public double VideoSendBacklogMs => Pacer?.QueuedMilliseconds ?? 0;
 
         /// <summary>
+        /// Drops all outgoing video state tied to already-sent/queued content:
+        /// packets waiting in the pacer AND the NACK retransmit buffer. Call
+        /// when the application swaps the content feeding this stream (e.g. a
+        /// live view change) so the previous content can neither drain onto
+        /// the wire late nor be resurrected by servicing a NACK for its
+        /// packets — a serviced repair completes a stale frame at the receiver
+        /// with a fresh receive time, indistinguishable from new video.
+        /// </summary>
+        public void FlushVideoPacer()
+        {
+            Pacer?.Clear();
+            _retransmitBuffer?.Clear();
+        }
+
+        /// <summary>
         /// Services an RTCP Generic NACK by retransmitting any requested packets
         /// still held in the retransmit buffer (same SSRC, original seqnum and
         /// timestamp, fresh SRTP protection and TWCC seqnum). Requests for packets

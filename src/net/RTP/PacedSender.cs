@@ -96,6 +96,7 @@ namespace SIPSorcery.net.RTP
         private double _paceBytesPerSecond; // 0 = bypass
         private long _dropLogTicks;
         private int _droppedSinceLog;
+        private volatile bool _flushRequested;
 
         public PacedSender(Func<PacedPacket, Task> sendNow)
         {
@@ -141,6 +142,22 @@ namespace SIPSorcery.net.RTP
                     _drainTask ??= Task.Run(DrainLoopAsync);
                 }
             }
+        }
+
+        /// <summary>
+        /// Drops everything currently queued. Used on stream swaps (e.g. live view
+        /// changes) so the tail of the previous stream's video — up to
+        /// MAX_QUEUE_DELAY_SECONDS of it — can't drain onto the wire after the
+        /// application has already switched content and acknowledged the swap.
+        /// Sequence numbers are assigned at send time, not enqueue time, so
+        /// dropping queued packets creates no RTP sequence gap; the receiver just
+        /// never completes the in-flight frame and recovers on the next keyframe.
+        /// The actual drop happens on the drain loop's next tick (≤5ms) because it
+        /// is the channel's single reader.
+        /// </summary>
+        public void Clear()
+        {
+            _flushRequested = true;
         }
 
         /// <summary>
@@ -193,6 +210,18 @@ namespace SIPSorcery.net.RTP
                     long now = Stopwatch.GetTimestamp();
                     double elapsedSec = (double)(now - lastTicks) / Stopwatch.Frequency;
                     lastTicks = now;
+
+                    if (_flushRequested)
+                    {
+                        _flushRequested = false;
+                        while (_queue.Reader.TryRead(out var dropPkt))
+                        {
+                            Interlocked.Add(ref _queuedBytes, -dropPkt.Length);
+                            ArrayPool<byte>.Shared.Return(dropPkt.Payload);
+                        }
+                        budgetBytes = 0;
+                        continue;
+                    }
 
                     double rate = Volatile.Read(ref _paceBytesPerSecond);
                     if (rate <= 0)

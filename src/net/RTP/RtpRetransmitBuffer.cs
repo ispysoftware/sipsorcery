@@ -146,6 +146,35 @@ namespace SIPSorcery.net.RTP
             }
         }
 
+        /// <summary>
+        /// Drops every stored packet. Called on stream content swaps (live view
+        /// changes, clip changes): after a swap, NACKs for the previous content's
+        /// packets must go unserviced. Servicing one completes an old frame at
+        /// the receiver ~an RTCP feedback interval later, delivering stale
+        /// content stamped with a FRESH receive time — indistinguishable from
+        /// new video to the client (observed as a one-frame old-view flash on
+        /// view switches). Left unserviced, the receiver just discards the
+        /// incomplete frame and resyncs on the swap's forced keyframe.
+        /// </summary>
+        public void Clear()
+        {
+            lock (_lock)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+                for (int i = 0; i < _entries.Length; i++)
+                {
+                    if (_entries[i].Payload != null)
+                    {
+                        ArrayPool<byte>.Shared.Return(_entries[i].Payload);
+                        _entries[i].Payload = null;
+                    }
+                }
+            }
+        }
+
         public void Dispose()
         {
             lock (_lock)
