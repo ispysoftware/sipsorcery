@@ -920,9 +920,12 @@ namespace SIPSorcery.Net
         private readonly SemaphoreSlim _iceServerLock = new SemaphoreSlim(1, 1);
         /// <summary>
         /// Checks the list of ICE servers to perform STUN binding or TURN reservation requests.
-        /// Only one of the ICE server entries should end up being used. If at least one TURN server
-        /// is provided it will take precedence as it can potentially supply both Server Reflexive 
-        /// and Relay candidates.
+        /// All servers are checked concurrently: STUN servers in parallel plus one TURN server at
+        /// a time (UDP before TCP so the transport fallback order is kept and duplicate relay
+        /// allocations on the same server are avoided). Previously a single server was checked at
+        /// a time with TURN prioritised, which meant an unreachable TURN server starved STUN
+        /// gathering of a server reflexive candidate for seconds (longer over TCP), and the first
+        /// server to succeed stopped the others from ever being checked.
         /// </summary>
         private async void CheckIceServers(Object state)
         {
@@ -942,103 +945,62 @@ namespace SIPSorcery.Net
             {
                 try
                 {
-                    if (_activeIceServer == null || _activeIceServer.Error != SocketError.Success)
+                    // A single server reflexive end point and a single relay allocation are all that
+                    // is ever used, so a success by any server in a group (STUN or TURN) stops the
+                    // remaining servers in that group being checked. In particular the TCP TURN
+                    // fallback must NOT be stepped once the UDP TURN allocation has succeeded: it
+                    // would create a duplicate allocation and repoint _activeIceServer so the TURN
+                    // refresh timer renewed the wrong allocation.
+                    bool srflxObtained = _iceServerConnections.Any(x => !IsTurnServer(x.Value) && x.Value.ServerReflexiveEndPoint != null);
+                    bool relayObtained = _iceServerConnections.Any(x => IsTurnServer(x.Value) && x.Value.RelayEndPoint != null);
+
+                    // Servers whose group still needs candidates and that have not failed. STUN
+                    // servers are stepped first so a slow TURN request (e.g. a blocking TCP connect)
+                    // cannot delay server reflexive candidate discovery within a tick.
+                    var pending = _iceServerConnections
+                        .Select(x => x.Value)
+                        .Where(x => x.Error == SocketError.Success && (IsTurnServer(x) ? !relayObtained : !srflxObtained))
+                        .OrderBy(x => IsTurnServer(x))
+                        .ThenBy(x => x.Protocol == ProtocolType.Tcp) // Among TURN servers try UDP before TCP.
+                        .ToList();
+
+                    if (pending.Count == 0)
                     {
-                        if (_iceServerConnections.Count(x => x.Value.Error == SocketError.Success) == 0)
+                        if (srflxObtained || relayObtained)
+                        {
+                            // Every ICE server has either failed or its group has delivered candidates
+                            // and at least one succeeded, so gathering is finished. The next timer tick
+                            // sees the completed state, starts the TURN refresh timer and stops this one.
+                            IceGatheringState = RTCIceGatheringState.complete;
+                            OnIceGatheringStateChange?.Invoke(IceGatheringState);
+                        }
+                        else
                         {
                             logger.LogDebug("RTP ICE Channel all ICE server connection checks failed, stopping ICE servers timer.");
                             _processIceServersTimer.Dispose();
                         }
-                        else
-                        {
-                            // Select the next server to check.
-                            var entry = _iceServerConnections
-                            .Where(x => x.Value.Error == SocketError.Success)
-                            .OrderByDescending(x => x.Value._uri.Scheme) // TURN serves take priority.
-                            .FirstOrDefault();
-
-                            if (!entry.Equals(default(KeyValuePair<STUNUri, IceServer>)))
-                            {
-                                _activeIceServer = entry.Value;
-                            }
-                            else
-                            {
-                                logger.LogDebug("RTP ICE Channel was not able to set an active ICE server, stopping ICE servers timer.");
-                                _processIceServersTimer.Dispose();
-                            }
-                        }
-                    }
-
-                    // --- State machine logic ---
-
-                    if (_activeIceServer == null)
-                    {
-                        logger.LogDebug("RTP ICE Channel was not able to acquire an active ICE server, stopping ICE servers timer.");
-                        _processIceServersTimer.Dispose();
-                    }
-                    else if (((_activeIceServer._uri.Scheme == STUNSchemesEnum.turn || _activeIceServer._uri.Scheme == STUNSchemesEnum.turns) && _activeIceServer.RelayEndPoint != null) ||
-    ((_activeIceServer._uri.Scheme == STUNSchemesEnum.stun || _activeIceServer._uri.Scheme == STUNSchemesEnum.stuns) && _activeIceServer.ServerReflexiveEndPoint != null))
-                    {
-                        // Successfully set up the ICE server. Do nothing.
-                    }
-                    else if (_activeIceServer.ServerEndPoint == null && _activeIceServer.DnsLookupSentAt == DateTime.MinValue)
-                    {
-                        logger.LogDebug($"Attempting to resolve STUN server URI {_activeIceServer._uri}.");
-                        _activeIceServer.DnsLookupSentAt = DateTime.Now;
-
-                        // This fire-and-forget task for DNS is already a good non-blocking pattern.
-                        Task.Run(async () =>
-                        {
-                            try
-                            {
-                                var result = await STUNDns.Resolve(_activeIceServer._uri).ConfigureAwait(false);
-                                logger.LogDebug($"ICE server {_activeIceServer._uri} successfully resolved to {result}.");
-                                _activeIceServer.ServerEndPoint = result;
-                            }
-                            catch
-                            {
-                                logger.LogWarning($"Unable to resolve ICE server end point for {_activeIceServer._uri}.");
-                                _activeIceServer.Error = SocketError.HostNotFound;
-                            }
-                        });
-                    }
-                    else if (_activeIceServer.ServerEndPoint == null &&
-                        DateTime.Now.Subtract(_activeIceServer.DnsLookupSentAt).TotalSeconds < IceServer.DNS_LOOKUP_TIMEOUT_SECONDS)
-                    {
-                        // Waiting for DNS lookup to complete.
-                    }
-                    else if (_activeIceServer.ServerEndPoint == null)
-                    {
-                        logger.LogWarning($"ICE server DNS resolution failed for {_activeIceServer._uri}.");
-                        _activeIceServer.Error = SocketError.TimedOut;
-                    }
-                    else if (_activeIceServer.OutstandingRequestsSent >= IceServer.MAX_REQUESTS && _activeIceServer.LastResponseReceivedAt == DateTime.MinValue)
-                    {
-                        logger.LogWarning($"Connection attempt to ICE server {_activeIceServer._uri} timed out after {_activeIceServer.OutstandingRequestsSent} requests.");
-                        _activeIceServer.Error = SocketError.TimedOut;
-                    }
-                    else if (_activeIceServer.ErrorResponseCount >= IceServer.MAX_ERRORS)
-                    {
-                        logger.LogWarning($"Connection attempt to ICE server {_activeIceServer._uri} cancelled after {_activeIceServer.ErrorResponseCount} error responses.");
-                        _activeIceServer.Error = SocketError.TimedOut;
-                    }
-                    else if (_activeIceServer.ServerReflexiveEndPoint == null && (_activeIceServer._uri.Scheme == STUNSchemesEnum.stun || _activeIceServer._uri.Scheme == STUNSchemesEnum.stuns))
-                    {
-                        logger.LogDebug($"Sending STUN binding request to ICE server {_activeIceServer._uri} with address {_activeIceServer.ServerEndPoint}.");
-
-                        // Await the asynchronous send method.
-                        _activeIceServer.Error = await SendStunBindingRequestAsync(_activeIceServer).ConfigureAwait(false);
-                    }
-                    else if (_activeIceServer.ServerReflexiveEndPoint == null && (_activeIceServer._uri.Scheme == STUNSchemesEnum.turn || _activeIceServer._uri.Scheme == STUNSchemesEnum.turns))
-                    {
-                        logger.LogDebug($"Sending TURN allocate request to ICE server {_activeIceServer._uri} with address {_activeIceServer.ServerEndPoint}.");
-
-                        // Await the asynchronous send method.
-                        _activeIceServer.Error = await SendTurnAllocateRequestAsync(_activeIceServer).ConfigureAwait(false);
                     }
                     else
                     {
-                        logger.LogWarning($"The active ICE server reached an unexpected state {_activeIceServer._uri}.");
+                        bool turnChecked = false;
+                        foreach (var iceServer in pending)
+                        {
+                            if (IsTurnServer(iceServer))
+                            {
+                                if (turnChecked)
+                                {
+                                    // Only one TURN server is worked on at a time; the rest are fallbacks
+                                    // that get their turn if the current one fails.
+                                    continue;
+                                }
+                                turnChecked = true;
+
+                                // The TURN refresh timer renews the allocation on this server.
+                                _activeIceServer = iceServer;
+                            }
+
+                            await CheckIceServerAsync(iceServer).ConfigureAwait(false);
+                        }
                     }
                 }
                 catch (Exception excp)
@@ -1050,6 +1012,77 @@ namespace SIPSorcery.Net
                     // Release the semaphore. This can be called from any thread.
                     _iceServerLock.Release();
                 }
+            }
+        }
+
+        private static bool IsTurnServer(IceServer iceServer)
+        {
+            return iceServer._uri.Scheme == STUNSchemesEnum.turn || iceServer._uri.Scheme == STUNSchemesEnum.turns;
+        }
+
+        /// <summary>
+        /// Advances the connection check state machine for a single ICE server.
+        /// </summary>
+        private async Task CheckIceServerAsync(IceServer iceServer)
+        {
+            if (iceServer.ServerEndPoint == null && iceServer.DnsLookupSentAt == DateTime.MinValue)
+            {
+                logger.LogDebug($"Attempting to resolve STUN server URI {iceServer._uri}.");
+                iceServer.DnsLookupSentAt = DateTime.Now;
+
+                // This fire-and-forget task for DNS is already a good non-blocking pattern.
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        var result = await STUNDns.Resolve(iceServer._uri).ConfigureAwait(false);
+                        logger.LogDebug($"ICE server {iceServer._uri} successfully resolved to {result}.");
+                        iceServer.ServerEndPoint = result;
+                    }
+                    catch
+                    {
+                        logger.LogWarning($"Unable to resolve ICE server end point for {iceServer._uri}.");
+                        iceServer.Error = SocketError.HostNotFound;
+                    }
+                });
+            }
+            else if (iceServer.ServerEndPoint == null &&
+                DateTime.Now.Subtract(iceServer.DnsLookupSentAt).TotalSeconds < IceServer.DNS_LOOKUP_TIMEOUT_SECONDS)
+            {
+                // Waiting for DNS lookup to complete.
+            }
+            else if (iceServer.ServerEndPoint == null)
+            {
+                logger.LogWarning($"ICE server DNS resolution failed for {iceServer._uri}.");
+                iceServer.Error = SocketError.TimedOut;
+            }
+            else if (iceServer.OutstandingRequestsSent >= IceServer.MAX_REQUESTS && iceServer.LastResponseReceivedAt == DateTime.MinValue)
+            {
+                logger.LogWarning($"Connection attempt to ICE server {iceServer._uri} timed out after {iceServer.OutstandingRequestsSent} requests.");
+                iceServer.Error = SocketError.TimedOut;
+            }
+            else if (iceServer.ErrorResponseCount >= IceServer.MAX_ERRORS)
+            {
+                logger.LogWarning($"Connection attempt to ICE server {iceServer._uri} cancelled after {iceServer.ErrorResponseCount} error responses.");
+                iceServer.Error = SocketError.TimedOut;
+            }
+            else if (iceServer.ServerReflexiveEndPoint == null && !IsTurnServer(iceServer))
+            {
+                logger.LogDebug($"Sending STUN binding request to ICE server {iceServer._uri} with address {iceServer.ServerEndPoint}.");
+
+                // Await the asynchronous send method.
+                iceServer.Error = await SendStunBindingRequestAsync(iceServer).ConfigureAwait(false);
+            }
+            else if (iceServer.ServerReflexiveEndPoint == null && IsTurnServer(iceServer))
+            {
+                logger.LogDebug($"Sending TURN allocate request to ICE server {iceServer._uri} with address {iceServer.ServerEndPoint}.");
+
+                // Await the asynchronous send method.
+                iceServer.Error = await SendTurnAllocateRequestAsync(iceServer).ConfigureAwait(false);
+            }
+            else
+            {
+                logger.LogWarning($"The active ICE server reached an unexpected state {iceServer._uri}.");
             }
         }
 
@@ -1072,7 +1105,11 @@ namespace SIPSorcery.Net
             {
                 RTCIceCandidate svrRflxCandidate = iceServer.GetCandidate(init, RTCIceCandidateType.srflx);
 
-                if (_policy == RTCIceTransportPolicy.all && svrRflxCandidate != null)
+                // With multiple ICE servers gathering concurrently several STUN servers will typically
+                // report the same mapped address; only surface each distinct end point once.
+                if (_policy == RTCIceTransportPolicy.all && svrRflxCandidate != null &&
+                    !_candidates.Any(x => x.type == RTCIceCandidateType.srflx &&
+                        x.address == svrRflxCandidate.address && x.port == svrRflxCandidate.port))
                 {
                     logger.LogDebug($"Adding server reflex ICE candidate for ICE server {iceServer._uri} and {iceServer.ServerReflexiveEndPoint}.");
 
@@ -1106,8 +1143,8 @@ namespace SIPSorcery.Net
                 }
             }
 
-            IceGatheringState = RTCIceGatheringState.complete;
-            OnIceGatheringStateChange?.Invoke(IceGatheringState);
+            // Gathering is NOT marked complete here: other ICE servers may still be gathering.
+            // CheckIceServers sets the completed state once every server has finished or failed.
         }
 
         /// <summary>
