@@ -1101,7 +1101,11 @@ namespace SIPSorcery.Net
                 sdpMLineIndex = SDP_MLINE_INDEX,
             };
 
-            if (iceServer.ServerReflexiveEndPoint != null)
+            // A mapped address from a locally addressed ICE server (e.g. a TURN server on this
+            // machine reached via loopback) is the local address, not a public one, and is
+            // useless to a remote peer as a server reflexive candidate.
+            if (iceServer.ServerReflexiveEndPoint != null &&
+                !IPAddress.IsLoopback(iceServer.ServerReflexiveEndPoint.Address))
             {
                 RTCIceCandidate svrRflxCandidate = iceServer.GetCandidate(init, RTCIceCandidateType.srflx);
 
