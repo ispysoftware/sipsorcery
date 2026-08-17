@@ -126,7 +126,7 @@ namespace SIPSorcery.SIP
 
                 if (certificateType == "file")
                 {
-                    var serverCertificate = new X509Certificate2(certifcateLocation, certKeyPassword);
+                    var serverCertificate = X509CertificateLoader.LoadPkcs12FromFile(certifcateLocation, certKeyPassword);
                     //DisplayCertificateChain(m_serverCertificate);
                     var verifyCert = serverCertificate.Verify();
                     logger.LogDebug("Server Certificate loaded from file, Subject={Subject}, valid={Valid}.", serverCertificate.Subject, verifyCert);
