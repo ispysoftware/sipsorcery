@@ -784,6 +784,27 @@ namespace SIPSorcery.Net
                 localAddresses = new List<IPAddress> { rtpBindAddress };
             }
 
+            if (localAddresses.Count == 0)
+            {
+                // No usable non-loopback addresses means the machine has no network connection
+                // (RFC8445 excludes loopback from host candidates). With no addresses at all ICE
+                // cannot succeed, so fall back to loopback to keep same-machine sessions working.
+                logger.LogWarning("No non-loopback local addresses available for ICE host candidates, falling back to loopback.");
+
+                if (IPAddress.IPv6Any.Equals(rtpBindAddress))
+                {
+                    if (base.RtpSocket.DualMode)
+                    {
+                        localAddresses.Add(IPAddress.Loopback);
+                    }
+                    localAddresses.Add(IPAddress.IPv6Loopback);
+                }
+                else
+                {
+                    localAddresses.Add(IPAddress.Loopback);
+                }
+            }
+
             foreach (var localAddress in localAddresses)
             {
                 var hostCandidate = new RTCIceCandidate(init);
