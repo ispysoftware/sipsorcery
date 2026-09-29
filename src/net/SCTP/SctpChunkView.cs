@@ -109,7 +109,16 @@ public readonly ref struct SctpChunkView
             if (started)
             {
                 int length = SctpTlvChunkParameter.ParseFirstWord(paramsBuffer, out var type);
-                paramsBuffer = paramsBuffer.Slice(length);
+
+                // A cause shorter than its own header left paramsBuffer where it was, and the ERROR chunk logging in
+                // SctpAssociation looped (and logged) forever on the receive thread. Causes are padded to 4 bytes, apart
+                // from the last, whose padding is outside the chunk length.
+                if (length < SctpTlvChunkParameter.SCTP_PARAMETER_HEADER_LENGTH)
+                {
+                    throw new ApplicationException($"SCTP error cause length {length} is shorter than the cause header.");
+                }
+
+                paramsBuffer = paramsBuffer.Slice(Math.Min((length + 3) & ~3, paramsBuffer.Length));
             }
             else
             {
@@ -170,9 +179,20 @@ public readonly ref struct SctpChunkView
 
     bool ValidateSack()
     {
+        ValidateBase();
+
+        // Length includes the chunk header, so it has to be counted here too. Without it a SACK could claim one more
+        // gap block or duplicate TSN than it carried, which got past this check and threw part way through
+        // SctpDataSender.GotSack, after the cumulative TSN ack had been applied (this path's side of GHSA-jwjp-4649-v8jp).
+        int minLength = SctpChunk.SCTP_CHUNK_HEADER_LENGTH + SctpSackChunk.FIXED_PARAMETERS_LENGTH;
+        if (Length < minLength)
+        {
+            throw new ApplicationException($"SCTP SACK chunk length {Length} is shorter than the minimum {minLength}.");
+        }
+
         int gapAckSize = NumGapAckBlocks * SctpSackChunk.GAP_REPORT_LENGTH;
         int dupTsnSize = NumDuplicateTSNs * SctpSackChunk.DUPLICATE_TSN_LENGTH;
-        int expectedLength = SctpSackChunk.FIXED_PARAMETERS_LENGTH + gapAckSize + dupTsnSize;
+        int expectedLength = minLength + gapAckSize + dupTsnSize;
         if (Length < expectedLength)
         {
             throw new ApplicationException($"SCTP SACK chunk length {Length} does not match expected length {expectedLength}.");

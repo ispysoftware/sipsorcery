@@ -134,12 +134,29 @@ namespace SIPSorcery.Net
             var sackChunk = new SctpSackChunk();
             ushort chunkLen = sackChunk.ParseFirstWord(buffer, posn);
 
+            if (chunkLen < SCTP_CHUNK_HEADER_LENGTH + FIXED_PARAMETERS_LENGTH)
+            {
+                throw new ApplicationException($"The SCTP SACK chunk was too short. The minimum length is {SCTP_CHUNK_HEADER_LENGTH + FIXED_PARAMETERS_LENGTH} bytes but the chunk specified {chunkLen} bytes.");
+            }
+
             ushort startPosn = (ushort)(posn + SCTP_CHUNK_HEADER_LENGTH);
 
             sackChunk.CumulativeTsnAck = NetConvert.ParseUInt32(buffer, startPosn);
             sackChunk.ARwnd = NetConvert.ParseUInt32(buffer, startPosn + 4);
             ushort numGapAckBlocks = NetConvert.ParseUInt16(buffer, startPosn + 8);
             ushort numDuplicateTSNs = NetConvert.ParseUInt16(buffer, startPosn + 10);
+
+            // Both counts come from the remote party (up to 65535 each) and the loops below trust them, so they have to
+            // fit the length the chunk declared. Otherwise the loops read the chunks after this one, or run off the end of
+            // the buffer (GHSA-jwjp-4649-v8jp, upstream a2466550b).
+            int requiredLen = SCTP_CHUNK_HEADER_LENGTH + FIXED_PARAMETERS_LENGTH
+                + numGapAckBlocks * GAP_REPORT_LENGTH
+                + numDuplicateTSNs * DUPLICATE_TSN_LENGTH;
+
+            if (requiredLen > chunkLen)
+            {
+                throw new ApplicationException($"The SCTP SACK chunk was too short for the gap ack block and duplicate TSN counts it specified. Required {requiredLen} bytes but the chunk specified {chunkLen} bytes.");
+            }
 
             int reportPosn = startPosn + FIXED_PARAMETERS_LENGTH;
 

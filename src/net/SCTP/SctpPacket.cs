@@ -230,6 +230,24 @@ namespace SIPSorcery.Net
 
             while (posn < length)
             {
+                // As SctpPacketView.Parse: a declared length under the chunk header's left the cursor where it was and
+                // this loop spinning, adding a chunk to the list each time round (GHSA-qmvg-569h-hqrh, upstream fe5a1fa4b).
+                if (length - posn < SctpChunk.SCTP_CHUNK_HEADER_LENGTH)
+                {
+                    throw new ApplicationException("The SCTP packet buffer was too short to contain a complete chunk header.");
+                }
+
+                int declaredLength = (int)SctpChunk.GetChunkLengthFromHeader(buffer, posn, false);
+                if (declaredLength < SctpChunk.SCTP_CHUNK_HEADER_LENGTH)
+                {
+                    throw new ApplicationException($"The SCTP chunk length was invalid. The minimum length is {SctpChunk.SCTP_CHUNK_HEADER_LENGTH} bytes but the packet specified {declaredLength} bytes.");
+                }
+
+                if (posn + declaredLength > length)
+                {
+                    throw new ApplicationException($"The SCTP packet buffer was too short. Required {declaredLength} chunk bytes but only {length - posn} available.");
+                }
+
                 byte chunkType = buffer[posn];
 
                 if (((SctpChunkType)chunkType).IsDefined())
@@ -264,7 +282,7 @@ namespace SIPSorcery.Net
                     break;
                 }
 
-                posn += (int)SctpChunk.GetChunkLengthFromHeader(buffer, posn, true);
+                posn += (declaredLength + 3) & ~3;
             }
 
             return new SctpPacket(header, chunks, unrecognisedChunks);

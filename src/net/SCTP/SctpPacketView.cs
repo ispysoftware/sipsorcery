@@ -64,8 +64,28 @@ public readonly ref struct SctpPacketView
 
         while (posn < buffer.Length)
         {
+            // The cursor moves on by the declared chunk length, so a length of 0 (an unrecognised chunk type to skip is
+            // enough) left it where it was and spun this loop on the receive thread for good. Nothing throws, so the
+            // receive loop's per-packet guard never saw it (GHSA-qmvg-569h-hqrh, upstream fe5a1fa4b).
+            if (buffer.Length - posn < SctpChunk.SCTP_CHUNK_HEADER_LENGTH)
+            {
+                throw new ApplicationException("The SCTP packet buffer was too short to contain a complete chunk header.");
+            }
+
+            int declaredLength = (int)SctpChunk.GetChunkLengthFromHeader(buffer, posn, false);
+            if (declaredLength < SctpChunk.SCTP_CHUNK_HEADER_LENGTH)
+            {
+                throw new ApplicationException($"The SCTP chunk length was invalid. The minimum length is {SctpChunk.SCTP_CHUNK_HEADER_LENGTH} bytes but the packet specified {declaredLength} bytes.");
+            }
+
+            if (posn + declaredLength > buffer.Length)
+            {
+                throw new ApplicationException($"The SCTP packet buffer was too short. Required {declaredLength} chunk bytes but only {buffer.Length - posn} available.");
+            }
+
             byte chunkType = buffer[posn];
-            int chunkLength = (int)SctpChunk.GetChunkLengthFromHeader(buffer, posn, true);
+            // Padded as an int: SctpPadding returns a ushort, which wraps a declared 65533-65535 round to 0.
+            int chunkLength = (declaredLength + 3) & ~3;
             var chunk = new Chunk() { Offset = posn, Length = chunkLength };
 
             if (((SctpChunkType)chunkType).IsDefined())
