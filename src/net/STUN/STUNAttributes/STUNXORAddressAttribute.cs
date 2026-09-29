@@ -59,7 +59,8 @@ namespace SIPSorcery.Net
             Port = (ushort)(BinaryPrimitives.ReadUInt16BigEndian(attributeValue.AsSpan(2)) ^ (ushort)(STUNHeader.MAGIC_COOKIE >> 16));
 
             // Allocate 4 bytes for IPv4, 16 bytes for IPv6
-            bool isIPv6 = Family == STUNAttributeConstants.IPv6AddressFamily[0] && TransactionId != null;
+            bool isIPv6 = Family == STUNAttributeConstants.IPv6AddressFamily[0] && TransactionId != null
+                && attributeValue.Length >= ADDRESS_ATTRIBUTE_IPV6_LENGTH && TransactionId.Length >= 12;
             byte[] address = new byte[isIPv6 ? 16 : 4];
             Span<byte> addrSpan = address;
 

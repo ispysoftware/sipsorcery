@@ -76,7 +76,16 @@ namespace SIPSorcery.net.RTP
                     var result = await m_socket.ReceiveFromAsync(buffer, SocketFlags.None, m_anyEndPoint).ConfigureAwait(false);
                     if (result.ReceivedBytes > 0)
                     {
-                        RaisePacketReceived((IPEndPoint)result.RemoteEndPoint, buffer.Slice(0, result.ReceivedBytes));
+                        try
+                        {
+                            RaisePacketReceived((IPEndPoint)result.RemoteEndPoint, buffer.Slice(0, result.ReceivedBytes));
+                        }
+                        catch (Exception packetExcp)
+                        {
+                            // A single packet that fails to process (it can come from anyone who can reach the socket,
+                            // unauthenticated) must not close the socket and kill the session: drop it and keep receiving.
+                            logger.LogWarning("UdpReceiver dropped a packet from {RemoteEndPoint} that could not be processed. {ErrorMessage}", result.RemoteEndPoint, packetExcp.Message);
+                        }
                     }
                 }
                 catch (SocketException sockExcp)

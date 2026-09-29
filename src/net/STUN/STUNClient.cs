@@ -50,6 +50,10 @@ public class STUNClient
             if (result.Buffer?.Length > 0)
             {
                 var stunResponse = STUNMessage.ParseSTUNMessage(result.Buffer);
+                if (stunResponse == null)
+                {
+                    return null;
+                }
 
                 foreach (var attr in stunResponse.Attributes)
                 {
@@ -96,7 +100,18 @@ public class STUNClient
                 if (!packet.IsEmpty)
                 {
                     // ParseSTUNMessage now takes a single ReadOnlyMemory<byte> argument.
+                    var span = packet.Span;
+                    if (span.Length < STUNHeader.STUN_HEADER_LENGTH || (span[0] & STUNHeader.STUN_INITIAL_BYTE_MASK) != 0)
+                    {
+                        // Not a STUN message (e.g. RTP, DTLS); keep waiting for the server's response.
+                        return;
+                    }
+
                     var stunResponse = STUNMessage.ParseSTUNMessage(packet);
+                    if (stunResponse == null)
+                    {
+                        return;
+                    }
                     IPEndPoint result = null;
 
                     foreach (var attr in stunResponse.Attributes)

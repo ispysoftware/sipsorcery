@@ -74,6 +74,10 @@ namespace SIPSorcery.Net
                 //Console.WriteLine(Utility.PrintBuffer(buffer));
 
                 STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer);
+                if (stunRequest == null)
+                {
+                    return;
+                }
                 //Console.WriteLine(stunRequest.ToString());
 
                 FireSTUNPrimaryRequestInTraceEvent(localEndPoint, receivedEndPoint, stunRequest);
@@ -143,6 +147,10 @@ namespace SIPSorcery.Net
                 //Console.WriteLine(Utility.PrintBuffer(buffer));
 
                 STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer);
+                if (stunRequest == null)
+                {
+                    return;
+                }
                 //Console.WriteLine(stunRequest.ToString());
 
                 FireSTUNSecondaryRequestInTraceEvent(localEndPoint, receivedEndPoint, stunRequest);

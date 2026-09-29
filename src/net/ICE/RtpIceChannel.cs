@@ -2566,6 +2566,11 @@ namespace SIPSorcery.Net
 
                 // Assumes ParseSTUNMessage can now efficiently handle Memory<byte>
                 var dataIndication = STUNMessage.ParseSTUNMessage(packet);
+                if (dataIndication == null)
+                {
+                    // Too short to be a STUN message.
+                    return;
+                }
 
                 STUNAttribute dataAttribute = null;
                 STUNXORAddressAttribute peerAddrAttribute = null;
@@ -2584,6 +2589,12 @@ namespace SIPSorcery.Net
                     // The real payload is the data attribute's value.
                     payload = dataAttribute.Value;
                     finalRemoteEndPoint = peerAddrAttribute.GetIPEndPoint();
+
+                    if (payload.Length < RTPHeader.MIN_HEADER_LEN)
+                    {
+                        // Nothing relayed to us (STUN, DTLS, RTP/RTCP) is this short (upstream 9f5206b37).
+                        return;
+                    }
                 }
                 else
                 {
@@ -2601,6 +2612,11 @@ namespace SIPSorcery.Net
                 {
                     // A. It's a STUN Message (first two bits are 00).
                     var stunMessage = STUNMessage.ParseSTUNMessage(payload);
+                    if (stunMessage == null)
+                    {
+                        // Too short to be a STUN message.
+                        return;
+                    }
                     _ = ProcessStunMessage(stunMessage, finalRemoteEndPoint, wasRelayed);
                 }
                 else

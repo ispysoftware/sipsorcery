@@ -169,7 +169,7 @@ namespace SIPSorcery.Net
                     int remainingBytes = endIndex - startAttIndex;
                     if (remainingBytes < 4)
                     {
-                        logger.LogWarning("The remaining number of bytes in the STUN message was less than the minimum attribute length 4. Remaining bytes: {RemainingBytes}.", remainingBytes);
+                        logger.LogDebug("The remaining number of bytes in the STUN message was less than the minimum attribute length 4. Remaining bytes: {RemainingBytes}.", remainingBytes);
                         break;
                     }
 
@@ -183,7 +183,7 @@ namespace SIPSorcery.Net
                     {
                         if (stunAttributeLength + startAttIndex + 4 > endIndex)
                         {
-                            logger.LogWarning($"The attribute length on a STUN parameter was greater than the available number of bytes. Type: {attributeType}");
+                            logger.LogDebug("The attribute length on a STUN parameter was greater than the available number of bytes. Type: {AttributeType}", attributeType);
                         }
                         else
                         {
@@ -196,33 +196,43 @@ namespace SIPSorcery.Net
                     {
                         break;
                     }
-                    STUNAttribute attribute = null;
-                    if (attributeType == STUNAttributeTypesEnum.ChangeRequest)
+
+                    if (!IsValueLengthValid(attributeType, stunAttributeValue, header))
                     {
-                        attribute = new STUNChangeRequestAttribute(stunAttributeValue);
-                    }
-                    else if (attributeType == STUNAttributeTypesEnum.MappedAddress || attributeType == STUNAttributeTypesEnum.AlternateServer)
-                    {
-                        attribute = new STUNAddressAttribute(attributeType, stunAttributeValue);
-                    }
-                    else if (attributeType == STUNAttributeTypesEnum.ErrorCode)
-                    {
-                        attribute = new STUNErrorCodeAttribute(stunAttributeValue);
-                    }
-                    else if (attributeType == STUNAttributeTypesEnum.XORMappedAddress || attributeType == STUNAttributeTypesEnum.XORPeerAddress || attributeType == STUNAttributeTypesEnum.XORRelayedAddress)
-                    {
-                        attribute = new STUNXORAddressAttribute(attributeType, stunAttributeValue, header.TransactionId);
-                    }
-                    else if (attributeType == STUNAttributeTypesEnum.ConnectionId)
-                    {
-                        attribute = new STUNConnectionIdAttribute(stunAttributeValue);
+                        // Typed attributes are parsed by fixed offsets; a short value (unauthenticated, from anyone who can
+                        // reach the socket) would otherwise throw and, before the UdpReceiver fix, close the RTP socket.
+                        logger.LogDebug("A STUN {AttributeType} attribute with a {ValueLength} byte value was malformed and skipped.", attributeType, stunAttributeValue?.Length ?? 0);
                     }
                     else
                     {
-                        attribute = new STUNAttribute(attributeType, stunAttributeValue);
-                    }
+                        STUNAttribute attribute = null;
+                        if (attributeType == STUNAttributeTypesEnum.ChangeRequest)
+                        {
+                            attribute = new STUNChangeRequestAttribute(stunAttributeValue);
+                        }
+                        else if (attributeType == STUNAttributeTypesEnum.MappedAddress || attributeType == STUNAttributeTypesEnum.AlternateServer)
+                        {
+                            attribute = new STUNAddressAttribute(attributeType, stunAttributeValue);
+                        }
+                        else if (attributeType == STUNAttributeTypesEnum.ErrorCode)
+                        {
+                            attribute = new STUNErrorCodeAttribute(stunAttributeValue);
+                        }
+                        else if (attributeType == STUNAttributeTypesEnum.XORMappedAddress || attributeType == STUNAttributeTypesEnum.XORPeerAddress || attributeType == STUNAttributeTypesEnum.XORRelayedAddress)
+                        {
+                            attribute = new STUNXORAddressAttribute(attributeType, stunAttributeValue, header.TransactionId);
+                        }
+                        else if (attributeType == STUNAttributeTypesEnum.ConnectionId)
+                        {
+                            attribute = new STUNConnectionIdAttribute(stunAttributeValue);
+                        }
+                        else
+                        {
+                            attribute = new STUNAttribute(attributeType, stunAttributeValue);
+                        }
 
-                    attributes.Add(attribute);
+                        attributes.Add(attribute);
+                    }
 
                     // Attributes start on 32 bit word boundaries so where an attribute length is not a multiple of 4 it gets padded. 
                     int padding = (stunAttributeLength % 4 != 0) ? 4 - (stunAttributeLength % 4) : 0;
@@ -234,8 +244,41 @@ namespace SIPSorcery.Net
             }
             else
             {
-                logger.LogWarning("Bad STUN attribute parse request. Start: {Start}; End: {End}; Length: {Length}.", startIndex, endIndex, buffer.Length);
+                logger.LogDebug("Bad STUN attribute parse request. Start: {Start}; End: {End}; Length: {Length}.", startIndex, endIndex, buffer.Length);
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Checks a received attribute value is long enough for its typed parser (after upstream bdb76cbc0).
+        /// </summary>
+        private static bool IsValueLengthValid(STUNAttributeTypesEnum attributeType, byte[] value, STUNHeader? header)
+        {
+            int length = value?.Length ?? 0;
+
+            switch (attributeType)
+            {
+                case STUNAttributeTypesEnum.MappedAddress:
+                case STUNAttributeTypesEnum.AlternateServer:
+                    return length >= STUNAddressAttributeBase.ADDRESS_ATTRIBUTE_IPV4_LENGTH;
+
+                case STUNAttributeTypesEnum.XORMappedAddress:
+                case STUNAttributeTypesEnum.XORPeerAddress:
+                case STUNAttributeTypesEnum.XORRelayedAddress:
+                    if (header == null || length < STUNAddressAttributeBase.ADDRESS_ATTRIBUTE_IPV4_LENGTH)
+                    {
+                        return false;
+                    }
+                    // An IPv6 family value needs the full 20 bytes (and the transaction ID to un-XOR it).
+                    return value[1] != STUNAttributeConstants.IPv6AddressFamily[0] || length >= STUNAddressAttributeBase.ADDRESS_ATTRIBUTE_IPV6_LENGTH;
+
+                case STUNAttributeTypesEnum.ChangeRequest:
+                case STUNAttributeTypesEnum.ErrorCode:
+                case STUNAttributeTypesEnum.ConnectionId:
+                    return length >= 4;
+
+                default:
+                    return true;
             }
         }
 

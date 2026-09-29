@@ -107,7 +107,16 @@ namespace SIPSorcery.net.ICE
                             byte[] packetBuffer = new byte[stunMsgBytes];
                             Buffer.BlockCopy(recvRemainingSegment.Array, recvRemainingSegment.Offset, packetBuffer, 0, stunMsgBytes);
 
-                            RaisePacketReceived(remoteEP, packetBuffer);
+                            try
+                            {
+                                RaisePacketReceived(remoteEP, packetBuffer);
+                            }
+                            catch (Exception packetExcp)
+                            {
+                                // The framing has already consumed exactly this packet, so dropping it keeps the stream
+                                // aligned; one bad relayed packet must not close the TURN connection.
+                                logger.LogWarning("IceTcpReceiver dropped a packet from {RemoteEndPoint} that could not be processed. {ErrorMessage}", remoteEP, packetExcp.Message);
+                            }
 
                             var newOffset = recvRemainingSegment.Offset + stunMsgBytes;
                             var newCount = recvRemainingSegment.Count - stunMsgBytes;

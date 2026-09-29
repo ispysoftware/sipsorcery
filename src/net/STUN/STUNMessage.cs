@@ -108,6 +108,12 @@ namespace SIPSorcery.Net
             stunMessage._receivedBuffer = buffer.ToArray();
             stunMessage.Header = STUNHeader.ParseSTUNHeader(bufferSpan);
 
+            if (stunMessage.Header == null)
+            {
+                // Too short for the 20 byte header: not a STUN message (upstream 9f5206b37). Callers must handle null.
+                return null;
+            }
+
             if (stunMessage.Header.MessageLength > 0)
             {
                 // Use buffer.Length instead of the old bufferLength parameter.
