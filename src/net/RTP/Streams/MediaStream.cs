@@ -435,11 +435,40 @@ namespace SIPSorcery.net.RTP
 
         #region SEND PACKET
 
+        // Sends dropped because the session is closed, or not secured yet. Frames the application already had in flight
+        // are expected in both cases (it keeps sending until it hears about the close, and starts before the DTLS
+        // handshake finishes), and used to log a warning per frame. The first drop logs at debug; a warning follows only
+        // if the sends are still arriving SEND_DROP_WARNING_INTERVAL_MS later, then at most once per interval.
+        private const long SEND_DROP_WARNING_INTERVAL_MS = 5000;
+        private long _sendsDroppedClosed;
+        private long _sendsDroppedClosedLoggedAt;
+        private long _sendsDroppedUnsecured;
+        private long _sendsDroppedUnsecuredLoggedAt;
+
+        private void ReportDroppedSend(ref long count, ref long loggedAt, string reason)
+        {
+            long dropped = Interlocked.Increment(ref count);
+            long now = Environment.TickCount64;
+
+            if (dropped == 1)
+            {
+                Interlocked.Exchange(ref loggedAt, now);
+                logger.LogDebug("{MediaType} send dropped, {Reason}.", MediaType, reason);
+                return;
+            }
+
+            long last = Interlocked.Read(ref loggedAt);
+            if (now - last >= SEND_DROP_WARNING_INTERVAL_MS && Interlocked.CompareExchange(ref loggedAt, now, last) == last)
+            {
+                logger.LogWarning("{Count} {MediaType} sends dropped, {Reason}; the application is still sending.", dropped, MediaType, reason);
+            }
+        }
+
         protected Boolean CheckIfCanSendRtpRaw()
         {
             if (IsClosed)
             {
-                logger.LogWarning($"SendRtpRaw was called for an {MediaType} packet on an closed RTP session.");
+                ReportDroppedSend(ref _sendsDroppedClosed, ref _sendsDroppedClosedLoggedAt, "the RTP session is closed");
                 return false;
             }
 
@@ -457,7 +486,7 @@ namespace SIPSorcery.net.RTP
 
             if ((RtpSessionConfig.IsSecure || RtpSessionConfig.UseSdpCryptoNegotiation) && SecureContext?.ProtectRtpPacket == null)
             {
-                logger.LogWarning("SendRtpPacket cannot be called on a secure session before calling SetSecurityContext.");
+                ReportDroppedSend(ref _sendsDroppedUnsecured, ref _sendsDroppedUnsecuredLoggedAt, "the secure context isn't set yet (DTLS handshake not complete)");
                 return false;
             }
 
