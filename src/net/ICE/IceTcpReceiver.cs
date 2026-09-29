@@ -49,6 +49,12 @@ namespace SIPSorcery.net.ICE
                 }
                 catch (SocketException sockExcp)
                 {
+                    if (m_isClosed)
+                    {
+                        // Closed locally (the ICE channel closing), which aborts the pending receive: not an error.
+                        break;
+                    }
+
                     logger.LogWarning($"SocketException in IceTcpReceiver loop ({sockExcp.SocketErrorCode}): {sockExcp.Message}");
                     // For TCP, a socket error is often fatal for the connection.
                     Close(sockExcp.Message);
@@ -61,11 +67,22 @@ namespace SIPSorcery.net.ICE
                 }
                 catch (Exception excp)
                 {
+                    if (m_isClosed)
+                    {
+                        break;
+                    }
+
                     logger.LogError(excp, $"Exception in IceTcpReceiver.ReceiveLoopAsync: {excp.Message}");
                     Close(excp.Message);
                     break;
                 }
             }
+
+            // As the base loop does. The receiver is started before its socket is connected, so this loop exits at
+            // once and has to be restartable (RtpIceChannel starts it again after connecting). Without this reset
+            // IsRunningReceive stayed true, the restart was skipped and nothing was ever read from a TURN over TCP
+            // connection.
+            m_isRunningReceive = false;
         }
 
         // This is the custom logic for this class that we want to preserve.

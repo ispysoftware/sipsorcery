@@ -1322,6 +1322,18 @@ namespace SIPSorcery.Net
         {
             if (!buffer.IsEmpty)
             {
+                // ICE source address filter (upstream 8a7604aa5, issues #1559 and #1731). STUN has already been handled
+                // by the ICE channel; DTLS, RTP and RTCP are only accepted from a known remote ICE candidate, see
+                // RtpIceChannel.IsKnownRemoteEndPoint.
+                if (!(_rtpIceChannel?.IsKnownRemoteEndPoint(remoteEP) ?? false))
+                {
+                    if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
+                    {
+                        logger.LogDebug("Dropped {ByteCount} byte non-STUN packet from {RemoteEndPoint}, it doesn't match a known remote ICE candidate.", buffer.Length, remoteEP);
+                    }
+                    return;
+                }
+
                 try
                 {
                     // Get a temporary Span for fast, synchronous operations like indexing.

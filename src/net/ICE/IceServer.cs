@@ -161,6 +161,13 @@ namespace SIPSorcery.Net
         internal IPEndPoint RelayEndPoint { get; set; }
 
         /// <summary>
+        /// The end point the TURN Allocate success response came from. Normally the same as ServerEndPoint, but a
+        /// server reached through a proxy (e.g. Docker's userland proxy, which answers from the bridge gateway) can
+        /// answer from another address, and its Data indications then come from there too.
+        /// </summary>
+        internal IPEndPoint AllocationSourceEndPoint { get; set; }
+
+        /// <summary>
         /// If requests to the server need to be authenticated this is the nonce to set. 
         /// Normally the nonce will come from the server in a 401 Unauthorized response.
         /// </summary>
@@ -309,6 +316,7 @@ namespace SIPSorcery.Net
                         if (mappedRelayAddrAttr != null)
                         {
                             RelayEndPoint = (mappedRelayAddrAttr as STUNXORAddressAttribute).GetIPEndPoint();
+                            AllocationSourceEndPoint = remoteEndPoint;
                         }
 
                         var lifetime = stunResponse.Attributes.FirstOrDefault(x => x.AttributeType == STUNAttributeTypesEnum.Lifetime);
@@ -338,13 +346,7 @@ namespace SIPSorcery.Net
 
                         if (errCodeAttribute.ErrorCode == STUN_UNAUTHORISED_ERROR_CODE || errCodeAttribute.ErrorCode == STUN_STALE_NONCE_ERROR_CODE)
                         {
-                            // Set the authentication properties authenticate.
-                            SetAuthenticationFields(stunResponse);
-
-                            // Set a new transaction ID.
-                            GenerateNewTransactionID();
-
-                            ErrorResponseCount = 1;
+                            HandleAuthenticationChallenge(stunResponse);
                         }
                         else if (alternateServerAttribute != null)
                         {
@@ -394,10 +396,7 @@ namespace SIPSorcery.Net
 
                         if (errCodeAttribute.ErrorCode == STUN_UNAUTHORISED_ERROR_CODE || errCodeAttribute.ErrorCode == STUN_STALE_NONCE_ERROR_CODE)
                         {
-                            SetAuthenticationFields(stunResponse);
-
-                            // Set a new transaction ID.
-                            GenerateNewTransactionID();
+                            HandleAuthenticationChallenge(stunResponse);
                         }
                         else
                         {
@@ -436,10 +435,7 @@ namespace SIPSorcery.Net
 
                         if (errCodeAttribute.ErrorCode == STUN_UNAUTHORISED_ERROR_CODE || errCodeAttribute.ErrorCode == STUN_STALE_NONCE_ERROR_CODE)
                         {
-                            SetAuthenticationFields(stunResponse);
-
-                            // Set a new transaction ID.
-                            GenerateNewTransactionID();
+                            HandleAuthenticationChallenge(stunResponse);
                         }
                         else
                         {
@@ -461,6 +457,31 @@ namespace SIPSorcery.Net
             }
 
             return candidatesAvailable;
+        }
+
+        /// <summary>
+        /// Handles a 401 Unauthorized / 438 Stale Nonce challenge to an Allocate, Binding or Refresh request: takes
+        /// the nonce and realm and rotates the transaction ID so the request is retried with credentials (upstream
+        /// 11241aa79). The first challenge, to a request sent without credentials, is how authentication starts and
+        /// is not counted as an error. A challenge after credentials were sent keeps counting towards MAX_ERRORS, so
+        /// wrong credentials fail the server instead of being retried for the life of the session (the Allocate
+        /// path used to reset the count to 1 on every challenge).
+        /// </summary>
+        /// <param name="stunResponse">The STUN authentication required error response.</param>
+        internal void HandleAuthenticationChallenge(STUNMessage stunResponse)
+        {
+            // Requests only carry credentials once a nonce has been obtained, so a nonce here means this challenge
+            // came back despite credentials being sent.
+            bool credentialsAlreadySent = Nonce != null;
+
+            SetAuthenticationFields(stunResponse);
+            GenerateNewTransactionID();
+
+            // A challenge without a nonce can't be answered, so it counts like any other error.
+            if (!credentialsAlreadySent && Nonce != null)
+            {
+                ErrorResponseCount = 1;
+            }
         }
 
         /// <summary>

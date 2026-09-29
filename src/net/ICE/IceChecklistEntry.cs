@@ -355,9 +355,24 @@ namespace SIPSorcery.Net
             }
             else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.CreatePermissionErrorResponse)
             {
-                logger.LogWarning("ICE RTP channel TURN Create Permission error response was received from {RemoteEndPoint}.", remoteEndPoint);
-                TurnPermissionsResponseAt = DateTime.Now;
-                State = retry ? State : ChecklistEntryState.Failed;
+                if (retry)
+                {
+                    // A 401 / 438 challenge: the authentication fields were refreshed above. TurnPermissionsResponseAt
+                    // is left unset so the permission is sent again with the new nonce; setting it made the next
+                    // connectivity check skip the permission and go to the relay without one, so the pair failed
+                    // (upstream 11241aa79). The re-sends are bounded by MAX_REQUESTS in RtpIceChannel.
+                    logger.LogDebug("ICE RTP channel re-sending TURN Create Permission after an authentication challenge from {RemoteEndPoint} for peer {Peer}.", remoteEndPoint, RemoteCandidate?.DestinationEndPoint);
+                }
+                else
+                {
+                    // Any other error (e.g. 403 Forbidden for a peer address the TURN server won't relay to) is final
+                    // for this candidate pair.
+                    var errCodeAttribute = stunResponse.Attributes.FirstOrDefault(x => x.AttributeType == STUNAttributeTypesEnum.ErrorCode) as STUNErrorCodeAttribute;
+                    logger.LogWarning("ICE RTP channel TURN Create Permission error response {ErrorCode} {ReasonPhrase} was received from {RemoteEndPoint} for peer {Peer}.",
+                        errCodeAttribute?.ErrorCode, errCodeAttribute?.ReasonPhrase, remoteEndPoint, RemoteCandidate?.DestinationEndPoint);
+                    TurnPermissionsResponseAt = DateTime.Now;
+                    State = ChecklistEntryState.Failed;
+                }
             }
             else
             {

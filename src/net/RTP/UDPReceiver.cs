@@ -30,7 +30,7 @@ namespace SIPSorcery.net.RTP
         protected readonly Socket m_socket;
         protected readonly byte[] m_recvBuffer;
         protected bool m_isClosed;
-        private bool m_isRunningReceive;
+        protected bool m_isRunningReceive;
         protected readonly IPEndPoint m_localEndPoint;
         protected readonly EndPoint m_anyEndPoint;
 
