@@ -103,14 +103,25 @@ namespace SIPSorcery.Sys
 
         static NetServices()
         {
-            NetworkChange.NetworkAddressChanged += (_, _) =>
+            // Guarded: an exception here fails the type initialiser, and with it every later use of NetServices (every
+            // RTP socket, so every peer connection) for the life of the process. Subscribing can throw where the runtime
+            // can't watch the network, e.g. on Linux when the netlink socket can't be created in a locked-down
+            // container. Without the event the cached addresses just aren't cleared when the network changes.
+            try
             {
-                // Clear cached addresses if the state of the local network interfaces change.
-                m_localAddressTable.Clear();
-                _localIPAddresses = null;
-                _internetDefaultAddress = null;
-                _internetDefaultIPv6Address = null;
-            };
+                NetworkChange.NetworkAddressChanged += (_, _) =>
+                {
+                    // Clear cached addresses if the state of the local network interfaces change.
+                    m_localAddressTable.Clear();
+                    _localIPAddresses = null;
+                    _internetDefaultAddress = null;
+                    _internetDefaultIPv6Address = null;
+                };
+            }
+            catch (Exception excp)
+            {
+                logger.LogWarning("NetServices could not subscribe to network address changes, cached local addresses won't be refreshed. {ErrorMessage}", excp.Message);
+            }
         }
 
         /// <summary>
