@@ -2409,7 +2409,16 @@ namespace SIPSorcery.Net
                 int res = secureContext.UnprotectRtcpPacket(packetBuffer.Span, packetBuffer.Length, out int outBufLen);
                 if (res != 0)
                 {
-                    logger.LogWarning($"SRTCP unprotect failed for SSRC {ssrc}, result {res}.");
+                    if (res == SIPSorcery.Net.SharpSRTP.SRTP.SrtpContext.ERROR_REPLAY_CHECK_FAILED ||
+                        res == SIPSorcery.Net.SharpSRTP.SRTP.SrtpContext.ERROR_GENERIC)
+                    {
+                        // Replays (duplicates) and runt/malformed packets are routine; don't warn per packet.
+                        logger.LogDebug("SRTCP unprotect failed for SSRC {Ssrc}, result {Result}.", ssrc, res);
+                    }
+                    else
+                    {
+                        logger.LogWarning("SRTCP unprotect failed for SSRC {Ssrc}, result {Result}.", ssrc, res);
+                    }
                     return;
                 }
                 packetBuffer = packetBuffer.Slice(0, outBufLen);

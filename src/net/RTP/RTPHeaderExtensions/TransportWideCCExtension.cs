@@ -79,6 +79,19 @@ namespace SIPSorcery.Net
         /// <returns>The number of bytes written.</returns>
         public override int Marshal(Span<byte> destination)
         {
+            return Marshal(destination, SequenceNumber);
+        }
+
+        /// <summary>
+        /// Writes the extension with an explicit sequence number instead of the instance's
+        /// <see cref="SequenceNumber"/>. The RTP send path uses this so the value on the wire
+        /// is the caller's own seqnum, never one another sender set on this shared object.
+        /// </summary>
+        /// <param name="destination">The buffer to write the payload into.</param>
+        /// <param name="sequenceNumber">The TWCC sequence number to write.</param>
+        /// <returns>The number of bytes written.</returns>
+        internal int Marshal(Span<byte> destination, ushort sequenceNumber)
+        {
             const int RTP_HEADER_EXTENSION_PAYLOAD_SIZE = 2;
             const int TOTAL_EXTENSION_SIZE = 1 + RTP_HEADER_EXTENSION_PAYLOAD_SIZE;
 
@@ -92,7 +105,7 @@ namespace SIPSorcery.Net
             destination[0] = headerByte;
 
             // Write the 2-byte sequence number after the ID/Length byte.
-            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(1), SequenceNumber);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(1), sequenceNumber);
 
             return TOTAL_EXTENSION_SIZE;
         }

@@ -70,11 +70,21 @@ namespace SIPSorcery.net.RTP
 
         protected bool _isClosed = false;
         /// <summary>
-        /// Used for keeping track of TWCC packets. Int (not ushort) so it can be
-        /// advanced with Interlocked — the pacer drain loop and NACK retransmissions
-        /// send concurrently with each other; the on-wire value is the low 16 bits.
+        /// Used for keeping track of TWCC packets. Advanced under <see cref="_sendLock"/>;
+        /// the on-wire value is the low 16 bits.
         /// </summary>
         private int _twccPacketCount = 0;
+
+        /// <summary>
+        /// Serialises the synchronous part of every outgoing RTP packet on this stream:
+        /// seqnum assignment, retransmit-buffer store/lookup, header + extension marshal
+        /// (TWCC seqnum) and SRTP protect. The pacer drain loop, unpaced sends and NACK
+        /// retransmissions run concurrently; without this the SRTP protect order could
+        /// differ from RTP seq order (the sender ROC advances when seq 0xFFFF is
+        /// protected) and a NACK resend's epoch check could go stale before its protect.
+        /// Never held across an await — the socket send happens outside it.
+        /// </summary>
+        private readonly object _sendLock = new object();
 
         /// <summary>
         /// Ring buffer of recently sent video packets used to answer RTCP Generic
@@ -348,9 +358,15 @@ namespace SIPSorcery.net.RTP
                     result = buffer.Slice(0, outBufLen);
                     return true;
                 }
+                else if (res == SIPSorcery.Net.SharpSRTP.SRTP.SrtpContext.ERROR_REPLAY_CHECK_FAILED ||
+                    res == SIPSorcery.Net.SharpSRTP.SRTP.SrtpContext.ERROR_GENERIC)
+                {
+                    // Replays (duplicates/retransmits) and runt/malformed packets are routine; don't warn per packet.
+                    logger.LogDebug("SRTP unprotect failed for {MediaType}, result {Result}.", MediaType, res);
+                }
                 else
                 {
-                    logger.LogWarning($"SRTP unprotect failed for {MediaType}, result {res}.");
+                    logger.LogWarning("SRTP unprotect failed for {MediaType}, result {Result}.", MediaType, res);
                 }
             }
 
@@ -483,146 +499,242 @@ namespace SIPSorcery.net.RTP
         /// Builds and sends an RTP packet immediately: assigns the sequence number,
         /// marshals header extensions (advancing the TWCC seqnum), stores video
         /// originals in the retransmit buffer, SRTP-protects and hands to the socket.
-        /// Called from the pacer drain loop, from unpaced sends, and from NACK
-        /// retransmissions (with an explicit seqNum).
+        /// Called from the pacer drain loop, from unpaced sends, and from the public
+        /// explicit-seqnum overloads. NACK retransmissions go through
+        /// <see cref="ResendRtpPacketAsync"/>.
         /// </summary>
         private async Task SendRtpRawNowAsync(ReadOnlyMemory<byte> payload, uint timestamp, int markerBit, int payloadType, ushort? seqNum)
         {
-            var extensions = LocalTrack?.HeaderExtensions?.Values;
-            bool hasExtensions = extensions?.Count > 0;
-
-            // Rent a single buffer large enough for header, extensions, payload, and SRTP protection.
-            int maxExtensionSize = hasExtensions ? 256 : 0;
-            // Use a constant for SRTP prefix length for clarity.
-            const int SRTP_MAX_PREFIX_LENGTH = 16;
-            int maxPacketSize = RTPHeader.MIN_HEADER_LEN + maxExtensionSize + payload.Length + SRTP_MAX_PREFIX_LENGTH;
-            byte[] rentedBuffer = ArrayPool<byte>.Shared.Rent(maxPacketSize);
+            var extensions = GetSendHeaderExtensions();
+            byte[] rentedBuffer = ArrayPool<byte>.Shared.Rent(GetMaxRtpPacketSize(payload.Length, extensions != null));
 
             try
             {
-                var packetSpan = rentedBuffer.AsSpan();
-                int cursor = 0;
+                ushort sequenceNumber;
+                int packetLength;
+                ArraySegment<byte> wirePacket;
 
-                var header = new RTPHeader
+                lock (_sendLock)
                 {
-                    SyncSource = LocalTrack.Ssrc,
-                    SequenceNumber = seqNum ?? LocalTrack.GetNextSeqNum(),
-                    Timestamp = timestamp,
-                    MarkerBit = markerBit,
-                    PayloadType = payloadType,
-                    // The extension flag will be set later if extensions are successfully written.
-                    HeaderExtensionFlag = 0
-                };
+                    sequenceNumber = seqNum ?? LocalTrack.GetNextSeqNum();
 
-                // Buffer video originals (not retransmissions) so RTCP Generic NACKs can
-                // be answered with a same-SSRC resend. Stored plaintext, pre-SRTP — the
-                // resend re-enters this method and is protected fresh.
-                if (seqNum == null && MediaType == SDPMediaTypesEnum.video)
-                {
-                    (_retransmitBuffer ??= new RtpRetransmitBuffer())
-                        .Store(header.SequenceNumber, payload.Span, timestamp, markerBit, payloadType);
-                }
-
-                // A. Write the main 12-byte header. We will patch the extension bit later if needed.
-                cursor += header.WriteTo(packetSpan);
-
-                if (hasExtensions)
-                {
-                    // --- This block now faithfully replicates the original's logic ---
-
-                    int extensionPayloadStartCursor = cursor + 4; // Leave 4 bytes for the extension header.
-                    int currentExtensionCursor = extensionPayloadStartCursor;
-
-                    // 1. Marshal all individual extensions into a contiguous block in our buffer.
-                    foreach (var ext in extensions)
+                    // Buffer video originals (not retransmissions) so RTCP Generic NACKs can
+                    // be answered with a same-SSRC resend. Stored plaintext, pre-SRTP — the
+                    // resend is protected fresh.
+                    if (seqNum == null && MediaType == SDPMediaTypesEnum.video)
                     {
-                        // The original's check for valid extension IDs.
-                        if (ext.Id < 1 || ext.Id > 14)
-                        {
-                            continue;
-                        }
-                        // Every RTP packet on a TWCC-negotiated stream must carry a unique
-                        // transport-wide seqnum with a matching send-time record, so the
-                        // counter is advanced here — the single choke point every packet
-                        // passes through — rather than in each packetiser. (Packetiser-side
-                        // calls to SetRtpHeaderExtensionValue historically missed the H264
-                        // FU-A fragment path, so all fragments of a large NAL shared one
-                        // stale seqnum and the TWCC bandwidth estimator ran on garbage.)
-                        if (ext is TransportWideCCExtension twccExt)
-                        {
-                            // Interlocked: the pacer drain loop and NACK retransmissions can
-                            // send concurrently. The wire value is the low 16 bits.
-                            var twccSeq = unchecked((ushort)Interlocked.Increment(ref _twccPacketCount));
-                            twccExt.Set(twccSeq);
-                            TwccSentPackets.RecordSend(twccSeq, Stopwatch.GetTimestamp());
-                        }
-                        int bytesWritten = ext.Marshal(packetSpan.Slice(currentExtensionCursor));
-                        currentExtensionCursor += bytesWritten;
+                        (_retransmitBuffer ??= new RtpRetransmitBuffer())
+                            .Store(sequenceNumber, payload.Span, timestamp, markerBit, payloadType);
                     }
 
-                    int extensionPayloadLength = currentExtensionCursor - extensionPayloadStartCursor;
-
-                    if (extensionPayloadLength > 0)
-                    {
-                        // 2. Add padding to ensure the extension block is a multiple of 4 bytes.
-                        int padding = 0;
-                        if (extensionPayloadLength % 4 != 0)
-                        {
-                            padding = 4 - (extensionPayloadLength % 4);
-                            packetSpan.Slice(currentExtensionCursor, padding).Clear();
-                        }
-
-                        int totalExtensionLength = extensionPayloadLength + padding;
-                        ushort extensionLengthInWords = (ushort)(totalExtensionLength / 4);
-
-                        // 3. Now that we have the final length, write the 4-byte extension header.
-                        BinaryPrimitives.WriteUInt16BigEndian(packetSpan.Slice(cursor), RTPHeader.ONE_BYTE_EXTENSION_PROFILE);
-                        BinaryPrimitives.WriteUInt16BigEndian(packetSpan.Slice(cursor + 2), extensionLengthInWords);
-
-                        // 4. Update the main cursor to be at the end of the full extension block.
-                        cursor += 4 + totalExtensionLength;
-
-                        // 5. Surgically patch the extension bit on the main header.
-                        packetSpan[0] |= 0x10; // Set the 'X' bit.
-                    }
+                    wirePacket = BuildRtpPacket(rentedBuffer, extensions, payload.Span, sequenceNumber, timestamp, markerBit, payloadType, out packetLength);
                 }
 
-                // B. Copy the main RTP payload after the header and any extensions.
-                payload.Span.CopyTo(packetSpan.Slice(cursor));
-                cursor += payload.Length;
-
-                int packetLength = cursor;
-
-                // D. Handle SRTP protection and send.
-                ProtectRtpPacket protectRtpPacket = SecureContext?.ProtectRtpPacket;
-                if (protectRtpPacket == null)
-                {
-                    // If not protecting, we create a copy of the exact size to send.
-                    var packetCopy = rentedBuffer.AsMemory(0, packetLength).ToArray();
-                    await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, new ArraySegment<byte>(packetCopy)).ConfigureAwait(false);
-                }
-                else
-                {
-                    // If protecting, we pass the original rentedBuffer which has space for the SRTP overhead.
-                    int rtperr = protectRtpPacket(rentedBuffer, packetLength, out int outBufLen);
-                    if (rtperr != 0)
-                    {
-                        logger.LogError($"SendRTPPacket protection failed, result {rtperr}.");
-                    }
-                    else
-                    {
-                        // Send the protected packet, which may be longer than the original.
-                        await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, new ArraySegment<byte>(rentedBuffer, 0, outBufLen)).ConfigureAwait(false);
-                    }
-                }
-
-                m_lastRtpTimestamp = timestamp;
-                RtcpSession?.RecordRtpPacketSend(packetLength, header.SequenceNumber, header.Timestamp);
+                await SendBuiltRtpPacketAsync(wirePacket, packetLength, sequenceNumber, timestamp).ConfigureAwait(false);
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(rentedBuffer);
             }
+        }
+
+        /// <summary>
+        /// Retransmits one buffered video packet for an RTCP Generic NACK (same SSRC,
+        /// original seqnum and timestamp, fresh SRTP protection and TWCC seqnum). The
+        /// retransmit-buffer lookup runs under <see cref="_sendLock"/> together with the
+        /// protect, so its SRTP epoch check can't be invalidated by a concurrent send of
+        /// seq 0xFFFF (which advances the sender ROC) in between.
+        /// </summary>
+        private async Task ResendRtpPacketAsync(RtpRetransmitBuffer buffer, ushort seq)
+        {
+            var extensions = GetSendHeaderExtensions();
+            byte[] payload = null;
+            byte[] rentedBuffer = null;
+
+            try
+            {
+                uint timestamp;
+                int packetLength;
+                ArraySegment<byte> wirePacket;
+
+                lock (_sendLock)
+                {
+                    if (!buffer.TryGetForResend(seq, out payload, out int length, out timestamp, out int markerBit, out int payloadType))
+                    {
+                        return;
+                    }
+
+                    rentedBuffer = ArrayPool<byte>.Shared.Rent(GetMaxRtpPacketSize(length, extensions != null));
+                    wirePacket = BuildRtpPacket(rentedBuffer, extensions, payload.AsSpan(0, length), seq, timestamp, markerBit, payloadType, out packetLength);
+                }
+
+                await SendBuiltRtpPacketAsync(wirePacket, packetLength, seq, timestamp).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (rentedBuffer != null)
+                {
+                    ArrayPool<byte>.Shared.Return(rentedBuffer);
+                }
+                if (payload != null)
+                {
+                    ArrayPool<byte>.Shared.Return(payload);
+                }
+            }
+        }
+
+        /// <summary>
+        /// The local track's header extensions, or null if there are none to write.
+        /// </summary>
+        private Dictionary<int, RTPHeaderExtension>.ValueCollection GetSendHeaderExtensions()
+        {
+            var extensions = LocalTrack?.HeaderExtensions?.Values;
+            return extensions?.Count > 0 ? extensions : null;
+        }
+
+        /// <summary>
+        /// Buffer size needed for an outgoing RTP packet: header, extensions, payload and SRTP overhead.
+        /// </summary>
+        private static int GetMaxRtpPacketSize(int payloadLength, bool hasExtensions)
+        {
+            int maxExtensionSize = hasExtensions ? 256 : 0;
+            // SRTP protects in place and appends the auth tag (and MKI), so reserve the full SRTP overhead:
+            // SharpSRTP throws rather than returning an error if the buffer is too small for the negotiated profile.
+            return RTPHeader.MIN_HEADER_LEN + maxExtensionSize + payloadLength + RTPSession.SRTP_MAX_PREFIX_LENGTH;
+        }
+
+        /// <summary>
+        /// Synchronous half of an RTP send: writes the header, header extensions and payload
+        /// into <paramref name="packetBuffer"/> and SRTP-protects it in place. MUST be called
+        /// under <see cref="_sendLock"/>. Returns the bytes to put on the wire, or a default
+        /// segment (null Array) if protection failed; <paramref name="packetLength"/> is the
+        /// plaintext length for RTCP sender stats.
+        /// </summary>
+        private ArraySegment<byte> BuildRtpPacket(byte[] packetBuffer, Dictionary<int, RTPHeaderExtension>.ValueCollection extensions,
+            ReadOnlySpan<byte> payload, ushort seq, uint timestamp, int markerBit, int payloadType, out int packetLength)
+        {
+            var packetSpan = packetBuffer.AsSpan();
+            int cursor = 0;
+
+            var header = new RTPHeader
+            {
+                SyncSource = LocalTrack.Ssrc,
+                SequenceNumber = seq,
+                Timestamp = timestamp,
+                MarkerBit = markerBit,
+                PayloadType = payloadType,
+                // The extension flag will be set later if extensions are successfully written.
+                HeaderExtensionFlag = 0
+            };
+
+            // A. Write the main 12-byte header. We will patch the extension bit later if needed.
+            cursor += header.WriteTo(packetSpan);
+
+            if (extensions != null)
+            {
+                // --- This block now faithfully replicates the original's logic ---
+
+                int extensionPayloadStartCursor = cursor + 4; // Leave 4 bytes for the extension header.
+                int currentExtensionCursor = extensionPayloadStartCursor;
+
+                // 1. Marshal all individual extensions into a contiguous block in our buffer.
+                foreach (var ext in extensions)
+                {
+                    // The original's check for valid extension IDs.
+                    if (ext.Id < 1 || ext.Id > 14)
+                    {
+                        continue;
+                    }
+                    int bytesWritten;
+                    // Every RTP packet on a TWCC-negotiated stream must carry a unique
+                    // transport-wide seqnum with a matching send-time record, so the
+                    // counter is advanced here — the single choke point every packet
+                    // passes through — rather than in each packetiser. (Packetiser-side
+                    // calls to SetRtpHeaderExtensionValue historically missed the H264
+                    // FU-A fragment path, so all fragments of a large NAL shared one
+                    // stale seqnum and the TWCC bandwidth estimator ran on garbage.)
+                    if (ext is TransportWideCCExtension twccExt)
+                    {
+                        // The wire value is the low 16 bits. Marshalled from the local value,
+                        // not the shared extension object's SequenceNumber.
+                        var twccSeq = unchecked((ushort)Interlocked.Increment(ref _twccPacketCount));
+                        twccExt.Set(twccSeq);
+                        TwccSentPackets.RecordSend(twccSeq, Stopwatch.GetTimestamp());
+                        bytesWritten = twccExt.Marshal(packetSpan.Slice(currentExtensionCursor), twccSeq);
+                    }
+                    else
+                    {
+                        bytesWritten = ext.Marshal(packetSpan.Slice(currentExtensionCursor));
+                    }
+                    currentExtensionCursor += bytesWritten;
+                }
+
+                int extensionPayloadLength = currentExtensionCursor - extensionPayloadStartCursor;
+
+                if (extensionPayloadLength > 0)
+                {
+                    // 2. Add padding to ensure the extension block is a multiple of 4 bytes.
+                    int padding = 0;
+                    if (extensionPayloadLength % 4 != 0)
+                    {
+                        padding = 4 - (extensionPayloadLength % 4);
+                        packetSpan.Slice(currentExtensionCursor, padding).Clear();
+                    }
+
+                    int totalExtensionLength = extensionPayloadLength + padding;
+                    ushort extensionLengthInWords = (ushort)(totalExtensionLength / 4);
+
+                    // 3. Now that we have the final length, write the 4-byte extension header.
+                    BinaryPrimitives.WriteUInt16BigEndian(packetSpan.Slice(cursor), RTPHeader.ONE_BYTE_EXTENSION_PROFILE);
+                    BinaryPrimitives.WriteUInt16BigEndian(packetSpan.Slice(cursor + 2), extensionLengthInWords);
+
+                    // 4. Update the main cursor to be at the end of the full extension block.
+                    cursor += 4 + totalExtensionLength;
+
+                    // 5. Surgically patch the extension bit on the main header.
+                    packetSpan[0] |= 0x10; // Set the 'X' bit.
+                }
+            }
+
+            // B. Copy the main RTP payload after the header and any extensions.
+            payload.CopyTo(packetSpan.Slice(cursor));
+            cursor += payload.Length;
+
+            packetLength = cursor;
+
+            // D. Handle SRTP protection.
+            ProtectRtpPacket protectRtpPacket = SecureContext?.ProtectRtpPacket;
+            if (protectRtpPacket == null)
+            {
+                // If not protecting, we create a copy of the exact size to send.
+                return new ArraySegment<byte>(packetBuffer.AsMemory(0, packetLength).ToArray());
+            }
+
+            // If protecting, we pass the original packetBuffer which has space for the SRTP overhead.
+            int rtperr = protectRtpPacket(packetBuffer, packetLength, out int outBufLen);
+            if (rtperr != 0)
+            {
+                logger.LogError($"SendRTPPacket protection failed, result {rtperr}.");
+                return default;
+            }
+
+            // The protected packet may be longer than the original.
+            return new ArraySegment<byte>(packetBuffer, 0, outBufLen);
+        }
+
+        /// <summary>
+        /// Asynchronous half of an RTP send: puts a packet built by <see cref="BuildRtpPacket"/>
+        /// on the wire (outside <see cref="_sendLock"/>) and updates the RTCP sender stats.
+        /// </summary>
+        private async Task SendBuiltRtpPacketAsync(ArraySegment<byte> wirePacket, int packetLength, ushort seq, uint timestamp)
+        {
+            if (wirePacket.Array != null)
+            {
+                await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, wirePacket).ConfigureAwait(false);
+            }
+
+            m_lastRtpTimestamp = timestamp;
+            RtcpSession?.RecordRtpPacketSend(packetLength, seq, timestamp);
         }
 
 
@@ -694,17 +806,7 @@ namespace SIPSorcery.net.RTP
 
             foreach (var seq in nack.GetSequenceNumbers())
             {
-                if (buffer.TryGetForResend(seq, out var payload, out var length, out var ts, out var marker, out var pt))
-                {
-                    try
-                    {
-                        await SendRtpRawNowAsync(new ReadOnlyMemory<byte>(payload, 0, length), ts, marker, pt, seq).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        ArrayPool<byte>.Shared.Return(payload);
-                    }
-                }
+                await ResendRtpPacketAsync(buffer, seq).ConfigureAwait(false);
             }
         }
 
