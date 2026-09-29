@@ -306,39 +306,51 @@ namespace SIPSorcery.Net
                         }
                         else
                         {
-                            var pkt = SctpPacketView.Parse(recvBuffer.Slice(0, bytesRead));
-
-                            if (pkt.Has(SctpChunkType.INIT))
+                            // Guarded per packet: a malformed packet or chunk (the parsers throw on bad lengths) is
+                            // dropped. It used to reach the fatal catch below, which ended this thread and with it
+                            // every data channel on the association. Transport failures still come from Receive above,
+                            // and application handlers are guarded where SctpAssociation invokes them, so what lands
+                            // here is the packet itself.
+                            try
                             {
-                                var initChunk = pkt.GetChunk(SctpChunkType.INIT);
-                                logger.LogDebug($"SCTP INIT packet received, initial tag {initChunk.InitiateTag}, initial TSN {initChunk.InitialTSN}.");
+                                var pkt = SctpPacketView.Parse(recvBuffer.Slice(0, bytesRead));
 
-                                GotInit(pkt, null);
-                            }
-                            else if (pkt.Has(SctpChunkType.COOKIE_ECHO))
-                            {
-                                // The COOKIE ECHO chunk is the 3rd step in the SCTP handshake when the remote party has
-                                // requested a new association be created.
-                                var cookie = base.GetCookie(pkt);
-
-                                if (cookie.IsEmpty())
+                                if (pkt.Has(SctpChunkType.INIT))
                                 {
-                                    logger.LogWarning($"SCTP error acquiring handshake cookie from COOKIE ECHO chunk.");
+                                    var initChunk = pkt.GetChunk(SctpChunkType.INIT);
+                                    logger.LogDebug($"SCTP INIT packet received, initial tag {initChunk.InitiateTag}, initial TSN {initChunk.InitialTSN}.");
+
+                                    GotInit(pkt, null);
+                                }
+                                else if (pkt.Has(SctpChunkType.COOKIE_ECHO))
+                                {
+                                    // The COOKIE ECHO chunk is the 3rd step in the SCTP handshake when the remote party has
+                                    // requested a new association be created.
+                                    var cookie = base.GetCookie(pkt);
+
+                                    if (cookie.IsEmpty())
+                                    {
+                                        logger.LogWarning($"SCTP error acquiring handshake cookie from COOKIE ECHO chunk.");
+                                    }
+                                    else
+                                    {
+                                        RTCSctpAssociation.GotCookie(cookie);
+
+                                        if (pkt.ChunkCount > 1)
+                                        {
+                                            // There could be DATA chunks after the COOKIE ECHO chunk.
+                                            RTCSctpAssociation.OnPacketReceived(pkt);
+                                        }
+                                    }
                                 }
                                 else
                                 {
-                                    RTCSctpAssociation.GotCookie(cookie);
-
-                                    if (pkt.ChunkCount > 1)
-                                    {
-                                        // There could be DATA chunks after the COOKIE ECHO chunk.
-                                        RTCSctpAssociation.OnPacketReceived(pkt);
-                                    }
+                                    RTCSctpAssociation.OnPacketReceived(pkt);
                                 }
                             }
-                            else
+                            catch (Exception pktExcp) when (pktExcp is not TlsFatalAlert)
                             {
-                                RTCSctpAssociation.OnPacketReceived(pkt);
+                                logger.LogWarning(pktExcp, "SCTP packet received on DTLS transport dropped, it could not be processed.");
                             }
                         }
                     }

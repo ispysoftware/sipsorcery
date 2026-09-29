@@ -457,8 +457,20 @@ namespace SIPSorcery.Net
 
                                 foreach (var frame in sortedFrames)
                                 {
-                                    OnData?.Invoke(frame);
-                                    frame.Dispose();
+                                    // The frames have already been acknowledged, so a handler that throws must not
+                                    // stop the rest being delivered (or leave the frame undisposed).
+                                    try
+                                    {
+                                        OnData?.Invoke(frame);
+                                    }
+                                    catch (Exception excp)
+                                    {
+                                        logger.LogError(excp, "SCTP data handler threw on association {ID}.", ID);
+                                    }
+                                    finally
+                                    {
+                                        frame.Dispose();
+                                    }
                                 }
                             }
 
@@ -678,7 +690,15 @@ namespace SIPSorcery.Net
 
                 SendChunk(abortChunk);
 
-                OnAborted?.Invoke(errorCause.CauseCode.ToString());
+                try
+                {
+                    OnAborted?.Invoke(errorCause.CauseCode.ToString());
+                }
+                catch (Exception excp)
+                {
+                    // The sender must still be closed.
+                    logger.LogError(excp, "SCTP aborted handler threw on association {ID}.", ID);
+                }
 
                 _dataSender.Close();
             }
@@ -692,7 +712,18 @@ namespace SIPSorcery.Net
         {
             logger.LogTrace($"SCTP state for association {ID} changed to {state}.");
             State = state;
-            OnAssociationStateChanged?.Invoke(state);
+
+            // The handlers (the transport, then the peer connection opening data channels and application code) run
+            // before the caller finishes the transition, e.g. starting the data sender once Established. One that
+            // throws must not leave the association Established with its sender never started.
+            try
+            {
+                OnAssociationStateChanged?.Invoke(state);
+            }
+            catch (Exception excp)
+            {
+                logger.LogError(excp, "SCTP state change handler threw on association {ID} for state {State}.", ID, state);
+            }
         }
 
         /// <summary>
