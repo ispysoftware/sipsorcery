@@ -190,6 +190,10 @@ namespace SIPSorcery.Net
             Close();
         }
 
+        // DebuggerNonUserCode on both Receive overloads: after Close() they throw SocketException(NotConnected) as the
+        // signal BouncyCastle expects (it catches it and ends the handshake / SCTP receive loop). Without the attribute,
+        // Just My Code treats that as "user-unhandled" and the debugger breaks on every viewer disconnect.
+        [System.Diagnostics.DebuggerNonUserCode]
         public int Receive(byte[] buf, int off, int len, int waitMillis)
         {
             return Receive(buf.AsSpan(off, len), waitMillis);
@@ -201,6 +205,7 @@ namespace SIPSorcery.Net
             OnDataReady?.Invoke(buf.AsSpan(off, len).ToArray());
         }
 
+        [System.Diagnostics.DebuggerNonUserCode]
         public int Receive(Span<byte> buffer, int waitMillis)
         {
             if (Volatile.Read(ref _isClosed) != 0)

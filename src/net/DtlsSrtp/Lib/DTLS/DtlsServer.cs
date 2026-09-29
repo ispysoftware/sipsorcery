@@ -195,7 +195,7 @@ namespace SIPSorcery.Net.SharpSRTP.DTLS
             }
 
             TlsAlertLevelsEnum alertLevel = TlsAlertLevelsEnum.Warn;
-            if (Enum.IsDefined(typeof(TlsAlertLevelsEnum), (int)alertLevel))
+            if (Enum.IsDefined(typeof(TlsAlertLevelsEnum), (int)level))
             {
                 alertLevel = (TlsAlertLevelsEnum)level;
             }

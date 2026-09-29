@@ -50,6 +50,11 @@ namespace SIPSorcery.Net
             // Called from the base constructor, so it must not depend on instance state.
             return WebRtcSrtpProfiles.ClientOffered;
         }
+
+        // BouncyCastle's initial DTLS handshake resend timer is 1000ms (doubling on each retry); the previous
+        // transport retried from ~100ms. RFC 6347 4.2.4.1 allows a shorter initial timer: 250ms recovers a lost
+        // first flight quickly without flooding high-RTT (e.g. TURN relayed) links.
+        public override int GetHandshakeResendTimeMillis() => 250;
     }
 
     public class WebRtcDtlsSrtpServer : DtlsSrtpServer
@@ -67,6 +72,9 @@ namespace SIPSorcery.Net
         {
             return WebRtcSrtpProfiles.ServerAccepted;
         }
+
+        // See WebRtcDtlsSrtpClient.GetHandshakeResendTimeMillis.
+        public override int GetHandshakeResendTimeMillis() => 250;
 
         /// <summary>
         /// This override prevents a TLS fault from being generated if a "Client Hello" is received that
