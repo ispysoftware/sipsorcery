@@ -13,6 +13,7 @@
 // BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
 //-----------------------------------------------------------------------------
 
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Xunit;
 
@@ -32,12 +33,12 @@ namespace SIPSorcery.Net.UnitTests
         /// Tests that the STUN client can get it's public IP address from a known STUN server.
         /// </summary>
         [Fact(Skip = "STUN server isn't kept running all the time.")]
-        public void GetPublicIPStunClientTestMethod()
+        public async Task GetPublicIPStunClientTestMethod()
         {
             logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            var publicIP = STUNClient.GetPublicIPAddress("stun.sipsorcery.com");
+            var publicIP = await STUNClient.GetPublicIPEndPointAsync("stun.sipsorcery.com");
 
             logger.LogDebug("Public IP address {publicIP}.", publicIP);
         }

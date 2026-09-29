@@ -1,14 +1,20 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net462;net8.0</TargetFrameworks>
+    <!-- The library (src/SIPSorcery.csproj) is net10.0 only. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Directory.Build.props pins 8.0 for the old multi-target builds; match the library. -->
+    <LangVersion>13.0</LangVersion>
     <IsPackable>false</IsPackable>
-    <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
     <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+    <!-- net10.0 audits transitive packages; a NuGet advisory should warn, not fail the restore. -->
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Remove="net\RTSP\RTSPConnectionUnitTest.cs" />
+    <!-- VideoTestPatternSource is in src\app\Media\Sources, which the library doesn't compile. -->
+    <Compile Remove="app\media\VideoTestPatternSourceUnitTest.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -25,7 +31,6 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <DotNetCliToolReference Include="dotnet-xunit" Version="2.3.0" />
   </ItemGroup>
 
   <ItemGroup>

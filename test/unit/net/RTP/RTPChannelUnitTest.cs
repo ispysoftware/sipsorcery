@@ -94,7 +94,7 @@ namespace SIPSorcery.Net.UnitTests
 
             logger.LogDebug("Attempting to send packet from {LocalEndPoint} to {RemoteEndPoint}.", channel1.RTPLocalEndPoint, channel2Dst);
 
-            var sendResult = channel1.Send(RTPChannelSocketsEnum.RTP, channel2Dst, new byte[] { 0x00 });
+            var sendResult = await channel1.SendAsync(RTPChannelSocketsEnum.RTP, channel2Dst, new byte[] { 0x00 });
 
             logger.LogDebug("Send result {SendResult}.", sendResult);
 
@@ -138,7 +138,7 @@ namespace SIPSorcery.Net.UnitTests
 
             logger.LogDebug("Attempting to send packet from {LocalEndPoint} to {RemoteEndPoint}.", channel1.RTPLocalEndPoint, channel2Dst);
 
-            var sendResult = channel1.Send(RTPChannelSocketsEnum.RTP, channel2Dst, new byte[] { 0x00 });
+            var sendResult = await channel1.SendAsync(RTPChannelSocketsEnum.RTP, channel2Dst, new byte[] { 0x00 });
 
             logger.LogDebug("Send result {SendResult}.", sendResult);
 
@@ -193,7 +193,7 @@ namespace SIPSorcery.Net.UnitTests
 
             logger.LogDebug("Attempting to send packet from {LocalEndPoint} to {RemoteEndPoint}.", channel1.RTPLocalEndPoint, channel2Dst);
 
-            var sendResult = channel1.Send(RTPChannelSocketsEnum.RTP, channel2Dst, new byte[] { 0x00 });
+            var sendResult = await channel1.SendAsync(RTPChannelSocketsEnum.RTP, channel2Dst, new byte[] { 0x00 });
 
             logger.LogDebug("Send result {SendResult}.", sendResult);
 

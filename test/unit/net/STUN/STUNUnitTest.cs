@@ -50,7 +50,7 @@ namespace SIPSorcery.Net.UnitTests
                                          0x66, 0xb9, 0x48, 0x67, 0x83, 0x72, 0xd5, 0xa0, 0x7a, 0x87, 0xb5, 0x3f, 0x80, 0x28, 0x00, 0x04,
                                          0x49, 0x7e, 0x51, 0x17 };
 
-            STUNMessage stunMessage = STUNMessage.ParseSTUNMessage(stunReq, stunReq.Length);
+            STUNMessage stunMessage = STUNMessage.ParseSTUNMessage(stunReq);
             STUNHeader stunHeader = stunMessage.Header;
 
             logger.LogDebug("Request type = {MessageType}.", stunHeader.MessageType);
@@ -94,7 +94,7 @@ namespace SIPSorcery.Net.UnitTests
                     0x00, 0x08, 0x00, 0x14, 0x24, 0x37, 0x24, 0xa0, 0x05, 0x2d, 0x88, 0x97, 0xce, 0xa6, 0x4e, 0x90,
                     0x69, 0xf6, 0x39, 0x07, 0x7d, 0xb1, 0x6e, 0x71, 0x80, 0x28, 0x00, 0x04, 0xde, 0x6a, 0x05, 0xac};
 
-            STUNMessage stunMessage = STUNMessage.ParseSTUNMessage(stunResp, stunResp.Length);
+            STUNMessage stunMessage = STUNMessage.ParseSTUNMessage(stunResp);
 
             STUNHeader stunHeader = stunMessage.Header;
 
@@ -201,7 +201,7 @@ namespace SIPSorcery.Net.UnitTests
             0x29, 0x23, 0xe6, 0x7d, 0xec, 0x87, 0x6c, 0x07, 0x3a, 0xd6, 0x78, 0x15, 0x80, 0x28, 0x00, 0x04,
             0x1c, 0xae, 0x89, 0x2e};
 
-            STUNMessage stunMessage = STUNMessage.ParseSTUNMessage(stunReq, stunReq.Length);
+            STUNMessage stunMessage = STUNMessage.ParseSTUNMessage(stunReq);
             STUNHeader stunHeader = stunMessage.Header;
 
             logger.LogDebug("Request type = {MessageType}.", stunHeader.MessageType);
@@ -237,7 +237,7 @@ namespace SIPSorcery.Net.UnitTests
                     0x72, 0x6e, 0x2d, 0x34, 0x2e, 0x35, 0x2e, 0x30, 0x2e, 0x33, 0x20, 0x27, 0x64, 0x61, 0x6e, 0x20,
                     0x45, 0x69, 0x64, 0x65, 0x72, 0x27, 0x77, 0x75};
 
-            STUNMessage stunMessage = STUNMessage.ParseSTUNMessage(stunResp, stunResp.Length);
+            STUNMessage stunMessage = STUNMessage.ParseSTUNMessage(stunResp);
 
             STUNHeader stunHeader = stunMessage.Header;
 
@@ -346,7 +346,7 @@ namespace SIPSorcery.Net.UnitTests
             //logger.LogDebug($"HMAC: {buffer.Skip(buffer.Length - ).Take(20).ToArray().HexStr()}.");
             //logger.LogDebug($"Fingerprint: {buffer.Skip(buffer.Length -4).ToArray().HexStr()}.");
 
-            STUNMessage rndTripReq = STUNMessage.ParseSTUNMessage(buffer, buffer.Length);
+            STUNMessage rndTripReq = STUNMessage.ParseSTUNMessage(buffer);
 
             Assert.True(rndTripReq.isFingerprintValid);
             Assert.True(rndTripReq.CheckIntegrity(System.Text.Encoding.UTF8.GetBytes(icePassword)));
@@ -367,7 +367,7 @@ namespace SIPSorcery.Net.UnitTests
                 "0001003C2112A4424A5655444B44544753454455000600095A4C45423A4554454F00000000240" +
                 "008CC3A28000000000000080014B295EDA4BC88A0BC885D745644D36E51FE3CBD1880280004EDF60FF7");
 
-            STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer, buffer.Length);
+            STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer);
 
             Assert.True(stunRequest.isFingerprintValid);
             Assert.True(stunRequest.CheckIntegrity(System.Text.Encoding.UTF8.GetBytes(icePassword)));
@@ -385,7 +385,7 @@ namespace SIPSorcery.Net.UnitTests
             stunRequest.Attributes.Add(new STUNAttribute(STUNAttributeTypesEnum.UseCandidate, null));
             byte[] stunReqBytes = stunRequest.ToByteBufferStringKey("dummy", true);
 
-            var stunReq = STUNMessage.ParseSTUNMessage(stunReqBytes, stunReqBytes.Length);
+            var stunReq = STUNMessage.ParseSTUNMessage(stunReqBytes);
 
             Assert.Equal(4, stunReq.Attributes.Single(x => x.AttributeType == STUNAttributeTypesEnum.Priority).Value.Length);
         }
@@ -408,7 +408,7 @@ namespace SIPSorcery.Net.UnitTests
                 0x07, 0x8a, 0x49, 0x2e
             };
 
-            var stunReq = STUNMessage.ParseSTUNMessage(buffer, buffer.Length);
+            var stunReq = STUNMessage.ParseSTUNMessage(buffer);
 
             Assert.NotNull(stunReq);
             Assert.Equal(1853882367U, 
@@ -430,7 +430,7 @@ namespace SIPSorcery.Net.UnitTests
             byte[] buffer = TypeExtensions.ParseHexStr(
                 "000100542112a4424f585055434d4e54425a4f4a00060015435242617a4d64534248616a494774433a45544d5300000000240004ff200000802a000852c0aba195cf65190025000000080014b05baf6be589d5ab202e9153547457eb1a20244c8028000464f37f6c");
 
-            STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer, buffer.Length);
+            STUNMessage stunRequest = STUNMessage.ParseSTUNMessage(buffer);
 
             Assert.True(stunRequest.isFingerprintValid);
             //Assert.True(stunRequest.CheckIntegrity(System.Text.Encoding.UTF8.GetBytes(icePassword)));

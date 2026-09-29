@@ -74,8 +74,9 @@ namespace SIPSorcery.Sys.UnitTests
             logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            var dateTime = new DateTime(2025, 2, 12, 23, 39, 0);
-            var unixTime = dateTime.ToUnixTime();
+            // UTC: an unspecified kind is treated as local time, so the result depended on the machine's timezone.
+            var dateTime = new DateTime(2025, 2, 12, 23, 39, 0, DateTimeKind.Utc);
+            var unixTime = dateTime.GetEpoch();
 
             logger.LogDebug("Unix time: {unixTime}.", unixTime);
 
@@ -88,8 +89,9 @@ namespace SIPSorcery.Sys.UnitTests
             logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            var dateTime = new DateTime(2060, 2, 13, 22, 54, 54);
-            var unixTime = dateTime.ToUnixTime();
+            // UTC, as in ToUnixTimeTest.
+            var dateTime = new DateTime(2060, 2, 13, 22, 54, 54, DateTimeKind.Utc);
+            var unixTime = dateTime.GetEpoch();
 
             logger.LogDebug("Unix time: {unixTime}.", unixTime);
 

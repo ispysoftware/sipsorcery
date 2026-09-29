@@ -13,6 +13,7 @@
 // BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
 //-----------------------------------------------------------------------------
 
+using System;
 using System.Linq;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -84,12 +85,12 @@ namespace SIPSorcery.Net.UnitTests
             return base.GetInitAck(initPacket, null);
         }
 
-        public new string GetCookieHMAC(byte[] buffer)
+        public new string GetCookieHMAC(ReadOnlySpan<byte> buffer)
         {
             return base.GetCookieHMAC(buffer);
         }
 
-        public override void Send(string associationID, byte[] buffer, int offset, int length)
+        public override void Send(string associationID, ReadOnlySpan<byte> buffer)
         { }
     }
 }

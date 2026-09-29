@@ -27,6 +27,20 @@ namespace SIPSorcery.Net.UnitTests
             logger = SIPSorcery.UnitTests.TestLogHelper.InitTestLogger(output);
         }
 
+        /// <summary>
+        /// Stand-in for the removed RTPHeader.GetHeader(seq, timestamp, ssrc): sets the fields and serialises via WriteTo.
+        /// </summary>
+        private static byte[] GetHeader(RTPHeader header, ushort sequenceNumber, uint timestamp, uint syncSource)
+        {
+            header.SequenceNumber = sequenceNumber;
+            header.Timestamp = timestamp;
+            header.SyncSource = syncSource;
+
+            byte[] buffer = new byte[header.Length];
+            header.WriteTo(buffer);
+            return buffer;
+        }
+
         [Fact]
         public void GetHeaderTest()
         {
@@ -34,7 +48,7 @@ namespace SIPSorcery.Net.UnitTests
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             RTPHeader rtpHeader = new RTPHeader();
-            byte[] headerBuffer = rtpHeader.GetHeader(1, 0, 1);
+            byte[] headerBuffer = GetHeader(rtpHeader, 1, 0, 1);
 
             int byteNum = 1;
             foreach (byte headerByte in headerBuffer)
@@ -51,7 +65,7 @@ namespace SIPSorcery.Net.UnitTests
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             RTPHeader src = new RTPHeader();
-            byte[] headerBuffer = src.GetHeader(1, 0, 1);
+            byte[] headerBuffer = GetHeader(src, 1, 0, 1);
             RTPHeader dst = new RTPHeader(headerBuffer);
 
             logger.LogDebug("Versions: {SrcVersion}, {DstVersion}", src.Version, dst.Version);
@@ -83,15 +97,15 @@ namespace SIPSorcery.Net.UnitTests
             logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
+            // Version and CSRCCount are no longer settable (private setters in the fork), so only the
+            // remaining customisable fields are round-tripped.
             RTPHeader src = new RTPHeader();
-            src.Version = 3;
             src.PaddingFlag = 1;
             src.HeaderExtensionFlag = 1;
             src.MarkerBit = 1;
-            src.CSRCCount = 3;
             src.PayloadType = (int)SDPWellKnownMediaFormatsEnum.PCMA;
 
-            byte[] headerBuffer = src.GetHeader(1, 0, 1);
+            byte[] headerBuffer = GetHeader(src, 1, 0, 1);
 
             RTPHeader dst = new RTPHeader(headerBuffer);
 
@@ -180,7 +194,7 @@ namespace SIPSorcery.Net.UnitTests
                 Assert.True(localRtpPacket.Header.ExtensionPayload.Length == localRtpPacket.Header.ExtensionLength * 4, "Extension length and payload were mismatched.");
             }
 
-            var result = RTPPacket.TryParse(rtpBytes, out var p, out var consumed);
+            var result = RTPPacket.TryParse(rtpBytes, out var p);
             Assert.True(result, "RTP packet was not parsed correctly.");
             Verify(p);
         }
@@ -221,7 +235,7 @@ namespace SIPSorcery.Net.UnitTests
             Assert.Equal(RTPHeaderExtensionType.OneByte, extension.Type);
 
             var expectedValue = new byte[] {0xb3, 0x85, 0xb0, 0x8f, 0xc, 0x13, 0x9d, 0xe5, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0};
-            Assert.Equal(expectedValue, extension.Data);
+            Assert.Equal(expectedValue, extension.Data.ToArray());
         }
 
         [Fact]

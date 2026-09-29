@@ -167,7 +167,7 @@ namespace SIPSorcery.Net.UnitTests
 
                 if (frames.Count > 0)
                 {
-                    logger.LogDebug("Receiver got frame of length {Length}.", frames.First().UserData?.Length);
+                    logger.LogDebug("Receiver got frame of length {Length}.", frames.First().UserData.Length);
                     frame = frames.First();
                     frameReady.Set();
                 }
@@ -187,7 +187,7 @@ namespace SIPSorcery.Net.UnitTests
 
             Assert.False(frame.IsEmpty());
             Assert.Equal(buffer.Length, frame.UserData.Length);
-            Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData));
+            Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData.ToArray()));
         }
 
         /// <summary>
@@ -215,7 +215,7 @@ namespace SIPSorcery.Net.UnitTests
 
                 if (frames.Count > 0)
                 {
-                    logger.LogDebug("Receiver got frame of length {Length}.", frames.First().UserData?.Length);
+                    logger.LogDebug("Receiver got frame of length {Length}.", frames.First().UserData.Length);
                     frame = frames.First();
                     frameReady.Set();
                 }
@@ -235,7 +235,7 @@ namespace SIPSorcery.Net.UnitTests
 
             Assert.False(frame.IsEmpty());
             Assert.Equal(RTCSctpTransport.SCTP_DEFAULT_MAX_MESSAGE_SIZE, (uint)frame.UserData.Length);
-            Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData));
+            Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData.ToArray()));
         }
 
         /// <summary>
@@ -272,7 +272,7 @@ namespace SIPSorcery.Net.UnitTests
 
                     if (frames.Count > 0)
                     {
-                        logger.LogDebug("Receiver got frame of length {Length}.", frames.First().UserData?.Length);
+                        logger.LogDebug("Receiver got frame of length {Length}.", frames.First().UserData.Length);
                         frame = frames.First();
                         frameReady.Set();
                     }
@@ -294,7 +294,7 @@ namespace SIPSorcery.Net.UnitTests
 
             Assert.False(frame.IsEmpty());
             Assert.Equal(buffer.Length, frame.UserData.Length);
-            Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData));
+            Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData.ToArray()));
         }
 
         /// <summary>
@@ -330,7 +330,7 @@ namespace SIPSorcery.Net.UnitTests
 
                     if (frames.Count > 0)
                     {
-                        logger.LogDebug("Receiver got frame of length {Length}.", frames.First().UserData?.Length);
+                        logger.LogDebug("Receiver got frame of length {Length}.", frames.First().UserData.Length);
                         frame = frames.First();
                         frameReady.Set();
                     }
@@ -355,7 +355,7 @@ namespace SIPSorcery.Net.UnitTests
 
             Assert.False(frame.IsEmpty());
             Assert.Equal(buffer.Length, frame.UserData.Length);
-            Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData));
+            Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData.ToArray()));
         }
     }
 }

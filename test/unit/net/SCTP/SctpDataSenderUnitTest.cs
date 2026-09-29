@@ -52,7 +52,7 @@ namespace SIPSorcery.Net.UnitTests
             Assert.Single(outStm);
 
             byte[] sendBuffer = outStm.Single();
-            SctpPacket pkt = SctpPacket.Parse(sendBuffer, 0, sendBuffer.Length);
+            SctpPacket pkt = SctpPacket.Parse(sendBuffer);
 
             Assert.NotNull(pkt);
             Assert.NotNull(pkt.Chunks.Single() as SctpDataChunk);

@@ -15,6 +15,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -167,7 +168,7 @@ namespace SIPSorcery.Net.UnitTests
             Crypto.GetRandomBytes(dummyData);
             string sha256Hash = Crypto.GetSHA256Hash(dummyData);
             var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            bAssoc.OnData += (frame) => tcs.TrySetResult(Crypto.GetSHA256Hash(frame.UserData));
+            bAssoc.OnData += (frame) => tcs.TrySetResult(Crypto.GetSHA256Hash(frame.UserData.ToArray()));
             aAssoc.SendData(0, 0, dummyData);
 
             var timeoutTask = Task.Delay(TimeSpan.FromSeconds(3));
@@ -248,12 +249,18 @@ namespace SIPSorcery.Net.UnitTests
     /// </summary>
     internal class MockB2BSctpTransport : SctpTransport
     {
+        /// <summary>
+        /// Packets are handed to the association as a <see cref="SctpPacketView"/>, a ref struct,
+        /// so the event needs its own delegate type rather than an Action.
+        /// </summary>
+        public delegate void SctpPacketHandler(SctpPacketView packet);
+
         private BlockingCollection<byte[]> _input;
         private BlockingCollection<byte[]> _output;
 
         private bool _exit;
 
-        public event Action<SctpPacket> OnSctpPacket;
+        public event SctpPacketHandler OnSctpPacket;
         public event Action<SctpTransportCookie> OnCookieEcho;
 
         public MockB2BSctpTransport(BlockingCollection<byte[]> output, BlockingCollection<byte[]> input)
@@ -268,18 +275,17 @@ namespace SIPSorcery.Net.UnitTests
             {
                 if (_input.TryTake(out var buffer, 1000))
                 {
-                    SctpPacket pkt = SctpPacket.Parse(buffer, 0, buffer.Length);
+                    var pkt = SctpPacketView.Parse(buffer);
 
                     // Process packet.
-                    if (pkt.Chunks.Any(x => x.KnownType == SctpChunkType.INIT))
+                    if (pkt.Has(SctpChunkType.INIT))
                     {
-                        var initAckPacket = base.GetInitAck(pkt, null);
+                        var initAckPacket = base.GetInitAck(pkt.AsPacket(), null);
                         var initAckBuffer = initAckPacket.GetBytes();
-                        Send(null, initAckBuffer, 0, initAckBuffer.Length);
+                        Send(null, initAckBuffer);
                     }
-                    else if (pkt.Chunks.Any(x => x.KnownType == SctpChunkType.COOKIE_ECHO))
+                    else if (pkt.Has(SctpChunkType.COOKIE_ECHO))
                     {
-                        var cookieEcho = pkt.Chunks.Single(x => x.KnownType == SctpChunkType.COOKIE_ECHO);
                         var cookie = base.GetCookie(pkt);
                         if (cookie.IsEmpty())
                         {
@@ -298,14 +304,33 @@ namespace SIPSorcery.Net.UnitTests
             }
         }
 
-        public override void Send(string associationID, byte[] buffer, int offset, int length)
+        public override void Send(string associationID, ReadOnlySpan<byte> buffer)
         {
-            _output.Add(buffer.Skip(offset).Take(length).ToArray());
+            _output.Add(buffer.ToArray());
         }
 
         public void Close()
         {
             _exit = true;
+        }
+    }
+
+    /// <summary>
+    /// Adapters for the tests written against the original SCTP API. The data receiver and sender
+    /// now take chunk views rather than chunk objects, and GotSack no longer ignores a null SACK
+    /// (the receiver has none to give until the initial DATA chunk arrives).
+    /// </summary>
+    internal static class SctpTestExtensions
+    {
+        internal static List<SctpDataFrame> OnDataChunk(this SctpDataReceiver receiver, SctpDataChunk dataChunk)
+            => receiver.OnDataChunk(dataChunk.View());
+
+        internal static void GotSack(this SctpDataSender sender, SctpSackChunk sack)
+        {
+            if (sack != null)
+            {
+                sender.GotSack(sack.View());
+            }
         }
     }
 }

@@ -52,10 +52,14 @@ namespace SIPSorcery.UnitTests.Net
                 buffer.Add(rtpPacket);
             }
 
-            for (ushort i = 1; i <= 3; i++)
+            // Packet 0 arrives last but before anything has been read, so it is the lowest buffered and comes out
+            // first. (Add used to drop it: it had no position for a packet below everything already buffered.)
+            for (ushort i = 0; i <= 3; i++)
             {
                 AssertSequenceNumber(buffer, i);
             }
+
+            Assert.False(buffer.Get(out _));
         }
 
         [Fact]
@@ -191,7 +195,7 @@ namespace SIPSorcery.UnitTests.Net
         }
 
         private RTPPacket CreatePacket(ushort seq, DateTime datetime = default) {
-            return new RTPPacket() { Header = new RTPHeader() { SequenceNumber = seq, ReceivedTime = datetime } };
+            return new RTPPacket(new RTPHeader() { SequenceNumber = seq, ReceivedTime = datetime }, ReadOnlyMemory<byte>.Empty);
         }
     }
 }
