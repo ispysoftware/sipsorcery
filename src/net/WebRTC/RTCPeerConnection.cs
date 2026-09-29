@@ -1813,10 +1813,20 @@ namespace SIPSorcery.Net
         {
             if (alertType == TlsAlertTypesEnum.CloseNotify)
             {
-                logger.LogDebug($"SCTP closing transport as a result of DTLS close notification.");
+                logger.LogDebug("Closing peer connection as a result of DTLS close notification.");
 
-                // No point keeping the SCTP association open if there is no DTLS transport available.
-                sctp?.Close();
+                // The remote peer tore down its DTLS transport (pc.close(), tab close, navigation, reload), so the whole
+                // peer connection is finished: closing now stops media immediately instead of after the ICE
+                // disconnected/failed timeouts (upstream e31f93c3e). Runs on the SCTP receive thread inside
+                // BouncyCastle's record processing; Close is re-entrant safe.
+                try
+                {
+                    Close("remote DTLS close notification");
+                }
+                catch (Exception excp)
+                {
+                    logger.LogWarning(excp, "Exception closing peer connection on DTLS close notification. {ErrorMessage}", excp.Message);
+                }
             }
             else
             {
