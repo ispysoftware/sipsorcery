@@ -18,6 +18,8 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE 
 // SOFTWARE.
+// Modified for Agent DVR: .NET system-crypto fast paths (AesGcm for single AEAD_AES_*_GCM, IncrementalHash HMAC-SHA1,
+// constant-time tag compare), keyed once per session key with BouncyCastle as the fallback.
 
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Digests;
@@ -30,6 +32,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using System.Threading;
 #if NET8_0_OR_GREATER
 using ReadOnlyBytes = System.ReadOnlySpan<byte>;
@@ -184,10 +187,32 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
 
         public event EventHandler<EventArgs> OnRekeyingRequested;
 
+        /// <summary>
+        /// BouncyCastle HMAC-SHA1 keyed with K_a. Always populated for HMAC_SHA1 profiles, but only used for tags when the
+        /// .NET IncrementalHash could not be created.
+        /// </summary>
         public HMac HMAC { get; private set; }
         public IBlockCipher PayloadCTR { get; private set; }
         public IBlockCipher PayloadF8 { get; private set; }
+
+        /// <summary>
+        /// BouncyCastle AEAD engine. For single AEAD_AES_*_GCM it is only used when .NET AesGcm is unavailable, and is then
+        /// keyed once in <see cref="DeriveSessionKeys"/> rather than per packet.
+        /// </summary>
         public IAeadBlockCipher PayloadAEAD { get; private set; }
+
+        // .NET system-crypto state, (re)created by DeriveSessionKeys; null means "use BouncyCastle". AesGcm and IncrementalHash hold
+        // native handles (finalizable SafeHandles). They are disposed on re-derivation; at end of life they are left to the
+        // finalizer, because the owners (DtlsSrtpTransport, SrtpHandler) swap/drop contexts while media threads may still be using them.
+        private AesGcm _payloadAesGcm;
+        private IncrementalHash _hmacSha1;
+
+        // PayloadAEAD (single AES-GCM fallback) was keyed in DeriveSessionKeys; per-packet Inits pass a null key.
+        private bool _payloadAeadKeyed;
+
+        // Last nonce encrypted by _payloadAesGcm, for parity with BouncyCastle GCM's "cannot reuse nonce" check.
+        private readonly byte[] _lastAesGcmEncryptNonce = new byte[Encryption.AEAD.BLOCK_SIZE];
+        private bool _lastAesGcmEncryptNonceSet;
 
         public byte[] Iv12 { get; } = new byte[Encryption.AEAD.BLOCK_SIZE];
         public byte[] Iv16 { get; } = new byte[Encryption.CTR.BLOCK_SIZE];
@@ -326,6 +351,10 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
         {
             var labelBaseValue = _contextType == SrtpContextType.RTP ? 0 : 3;
 
+            // Drop the previous session key's engines. Like the rest of this class, re-derivation must not run concurrently with
+            // protect/unprotect on this context: an in-flight call would hit a disposed AesGcm/IncrementalHash.
+            ReleaseSystemCrypto();
+
             switch (Cipher)
             {
                 case SrtpCiphers.NULL:
@@ -373,7 +402,17 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                         }
                         else if (Cipher == SrtpCiphers.AEAD_AES_128_GCM || Cipher == SrtpCiphers.AEAD_AES_256_GCM)
                         {
-                            this.PayloadAEAD = new GcmBlockCipher(AesUtilities.CreateEngine());
+                            var gcm = new GcmBlockCipher(AesUtilities.CreateEngine());
+                            this.PayloadAEAD = gcm;
+
+                            // Prefer .NET AesGcm (AES-NI/CNG/OpenSSL, keyed once, no per-packet allocation). Otherwise key the
+                            // BouncyCastle engine once so packets skip the AES key schedule and GHASH setup.
+                            _payloadAesGcm = CreateSystemAesGcm(K_e, N_tag);
+                            if (_payloadAesGcm == null)
+                            {
+                                SRTP.Encryption.AEAD.SetKey(gcm, new KeyParameter(K_e), N_tag);
+                                _payloadAeadKeyed = true;
+                            }
                         }
                         else if (Cipher == SrtpCiphers.DOUBLE_AEAD_AES_128_GCM_AEAD_AES_128_GCM || Cipher == SrtpCiphers.DOUBLE_AEAD_AES_256_GCM_AEAD_AES_256_GCM)
                         {
@@ -454,11 +493,125 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                         var hmac = new HMac(new Sha1Digest());
                         hmac.Init(new KeyParameter(K_a));
                         this.HMAC = hmac;
+
+                        _hmacSha1 = CreateSystemHmacSha1(K_a);
                     }
                     break;
 
                 default:
                     throw new NotSupportedException($"Unsupported auth {Auth.ToString()}!");
+            }
+        }
+
+        private void ReleaseSystemCrypto()
+        {
+            _payloadAesGcm?.Dispose();
+            _payloadAesGcm = null;
+            _payloadAeadKeyed = false;
+            _lastAesGcmEncryptNonceSet = false;
+
+            _hmacSha1?.Dispose();
+            _hmacSha1 = null;
+        }
+
+        private static AesGcm CreateSystemAesGcm(byte[] key, int tagLength)
+        {
+            if (!AesGcm.IsSupported || tagLength < AesGcm.TagByteSizes.MinSize || tagLength > AesGcm.TagByteSizes.MaxSize)
+            {
+                return null;
+            }
+
+            try
+            {
+                return new AesGcm(key, tagLength);
+            }
+            catch (CryptographicException)
+            {
+                return null;
+            }
+            catch (PlatformNotSupportedException)
+            {
+                return null;
+            }
+        }
+
+        private static IncrementalHash CreateSystemHmacSha1(byte[] key)
+        {
+            try
+            {
+                return IncrementalHash.CreateHMAC(HashAlgorithmName.SHA1, key);
+            }
+            catch (CryptographicException)
+            {
+                return null;
+            }
+            catch (PlatformNotSupportedException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Full 20-byte HMAC-SHA1 of <paramref name="payload"/> || <paramref name="suffix"/> into <paramref name="tag"/>; callers truncate to N_tag.
+        /// </summary>
+        private void GenerateAuthTag(ReadOnlySpan<byte> payload, ReadOnlySpan<byte> suffix, Span<byte> tag)
+        {
+            if (_hmacSha1 != null)
+            {
+                SRTP.Authentication.HMAC.GenerateAuthTag(_hmacSha1, payload, suffix, tag);
+            }
+            else
+            {
+                SRTP.Authentication.HMAC.GenerateAuthTag(HMAC, payload, suffix, tag);
+            }
+        }
+
+        /// <summary>
+        /// Single-AEAD payload encryption: writes ciphertext || tag (N_tag bytes) at the start of <paramref name="output"/>.
+        /// Uses the nonce in <see cref="Iv12"/>.
+        /// </summary>
+        private void SealPayload(ReadOnlySpan<byte> plaintext, Span<byte> output, ReadOnlySpan<byte> associatedData)
+        {
+            if (_payloadAesGcm != null)
+            {
+                // Parity with BouncyCastle GcmBlockCipher, which refuses two consecutive encryptions under the same key and nonce.
+                if (_lastAesGcmEncryptNonceSet && Iv12.AsSpan().SequenceEqual(_lastAesGcmEncryptNonce))
+                {
+                    throw new ArgumentException("cannot reuse nonce for GCM encryption");
+                }
+                Iv12.CopyTo(_lastAesGcmEncryptNonce, 0);
+                _lastAesGcmEncryptNonceSet = true;
+
+                SRTP.Encryption.AEAD.Encrypt(_payloadAesGcm, plaintext, output, Iv12, N_tag, associatedData);
+            }
+            else if (_payloadAeadKeyed)
+            {
+                SRTP.Encryption.AEAD.EncryptWithPresetKey(PayloadAEAD, true, plaintext, output, Iv12, N_tag, associatedData);
+            }
+            else
+            {
+                SRTP.Encryption.AEAD.Encrypt(PayloadAEAD, true, plaintext, output, Iv12, K_e, N_tag, associatedData);
+            }
+        }
+
+        /// <summary>
+        /// Single-AEAD payload decryption of <paramref name="input"/> (ciphertext || tag) into the start of <paramref name="output"/>.
+        /// Uses the nonce in <see cref="Iv12"/>. Authentication failure throws InvalidCipherTextException (BouncyCastle) or
+        /// AuthenticationTagMismatchException (.NET); callers map both to <see cref="ERROR_HMAC_CHECK_FAILED"/>.
+        /// </summary>
+        private void OpenPayload(ReadOnlySpan<byte> input, Span<byte> output, ReadOnlySpan<byte> associatedData)
+        {
+            if (_payloadAesGcm != null)
+            {
+                SRTP.Encryption.AEAD.Decrypt(_payloadAesGcm, input, output, Iv12, N_tag, associatedData);
+            }
+            else if (_payloadAeadKeyed)
+            {
+                SRTP.Encryption.AEAD.EncryptWithPresetKey(PayloadAEAD, false, input, output, Iv12, N_tag, associatedData);
+            }
+            else
+            {
+                SRTP.Encryption.AEAD.Encrypt(PayloadAEAD, false, input, output, Iv12, K_e, N_tag, associatedData);
             }
         }
 
@@ -620,7 +773,7 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                 case SrtpCiphers.SEED_128_GCM:
                     {
                         SRTP.Encryption.AEAD.GenerateMessageKeyIV(context.K_s, ssrc, index, context.Iv12);
-                        SRTP.Encryption.AEAD.Encrypt(context.PayloadAEAD, true, input.Slice(offset, length - offset), output.Slice(offset), context.Iv12, context.K_e, context.N_tag, output.Slice(0, offset));
+                        context.SealPayload(input.Slice(offset, length - offset), output.Slice(offset), output.Slice(0, offset));
                         length += context.N_tag;
                     }
                     break;
@@ -682,12 +835,16 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                     }
             }
 
-            byte[] auth = null;
-            if (context.Auth != SrtpAuth.NONE)
+            // Authenticated portion is header + payload || ROC (RFC 3711 4.2). The ROC is fed to the MAC from a stack buffer
+            // rather than written into the packet, and the full tag goes to the stack: no per-packet allocation.
+            var hasAuth = context.Auth != SrtpAuth.NONE;
+            Span<byte> auth = stackalloc byte[SRTP.Authentication.HMAC.HMAC_SHA1_LENGTH];
+            if (hasAuth)
             {
-                BinaryPrimitives.WriteUInt32BigEndian(output.Slice(length, 4), roc);
+                Span<byte> rocBytes = stackalloc byte[4];
+                BinaryPrimitives.WriteUInt32BigEndian(rocBytes, roc);
 
-                auth = SRTP.Authentication.HMAC.GenerateAuthTag(context.HMAC, output.Slice(0, length + 4));
+                context.GenerateAuthTag(output.Slice(0, length), rocBytes, auth);
             }
 
             var mki = context.Mki;
@@ -697,9 +854,9 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                 length += mki.Length;
             }
 
-            if (auth != null)
+            if (hasAuth)
             {
-                auth.AsSpan(0, context.N_tag).CopyTo(output.Slice(length, context.N_tag)); // we don't append ROC in SRTP
+                auth.Slice(0, context.N_tag).CopyTo(output.Slice(length, context.N_tag)); // we don't append ROC in SRTP
                 length += context.N_tag;
             }
 
@@ -804,10 +961,13 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                 return ERROR_GENERIC;
             }
 
+            // HMAC profiles: ...||MKI||tag (RFC 3711 3.1). AEAD profiles carry the tag inside the ciphertext, so the MKI is last:
+            // ...||ciphertext+tag||MKI (RFC 7714 8.1), which is where ProtectRtp writes it. Upstream always looked before N_tag.
+            var tagAfterMki = context.Auth != SrtpAuth.NONE ? context.N_tag : 0;
             var mkiSpan = mki.Span;
             for (var i = 0; i < mki.Length; i++)
             {
-                if (inputSpan[length - mki.Length - context.N_tag + i] != mkiSpan[i])
+                if (inputSpan[length - mki.Length - tagAfterMki + i] != mkiSpan[i])
                 {
                     outputBufferLength = 0;
                     return ERROR_MKI_CHECK_FAILED;
@@ -843,26 +1003,17 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
 
             if (context.Auth != SrtpAuth.NONE)
             {
+                // MAC over header + payload || ROC, fed straight from the packet (no copy into a rented buffer), compared in constant time.
                 var authenticatedLen = length - mki.Length - context.N_tag;
-                var msgAuth = ArrayPool<byte>.Shared.Rent(authenticatedLen + 4);
-                try
-                {
-                    input.Slice(0, authenticatedLen).CopyTo(msgAuth.AsSpan(0, authenticatedLen));
-                    BinaryPrimitives.WriteUInt32BigEndian(msgAuth.AsSpan(authenticatedLen, 4), roc);
+                Span<byte> rocBytes = stackalloc byte[4];
+                BinaryPrimitives.WriteUInt32BigEndian(rocBytes, roc);
 
-                    var auth = SRTP.Authentication.HMAC.GenerateAuthTag(context.HMAC, msgAuth.Slice(0, authenticatedLen + 4));
-                    for (var i = 0; i < context.N_tag; i++)
-                    {
-                        if (inputSpan[authenticatedLen + mki.Length + i] != auth[i])
-                        {
-                            outputBufferLength = 0;
-                            return ERROR_HMAC_CHECK_FAILED;
-                        }
-                    }
-                }
-                finally
+                Span<byte> auth = stackalloc byte[SRTP.Authentication.HMAC.HMAC_SHA1_LENGTH];
+                context.GenerateAuthTag(inputSpan.Slice(0, authenticatedLen), rocBytes, auth);
+                if (!CryptographicOperations.FixedTimeEquals(inputSpan.Slice(authenticatedLen + mki.Length, context.N_tag), auth.Slice(0, context.N_tag)))
                 {
-                    ArrayPool<byte>.Shared.Return(msgAuth);
+                    outputBufferLength = 0;
+                    return ERROR_HMAC_CHECK_FAILED;
                 }
             }
 
@@ -922,7 +1073,7 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                         {
                             SRTP.Encryption.AEAD.GenerateMessageKeyIV(context.K_s, ssrc, index, context.Iv12);
                             input.Slice(0, offset).CopyTo(output.Slice(0, offset));
-                            SRTP.Encryption.AEAD.Encrypt(context.PayloadAEAD, false, input.Slice(offset, length - mki.Length - offset), output.Slice(offset), context.Iv12, context.K_e, context.N_tag, input.Slice(0, offset));
+                            context.OpenPayload(input.Slice(offset, length - mki.Length - offset), output.Slice(offset), input.Slice(0, offset));
                             outputBufferLength = length - mki.Length - context.N_tag;
                         }
                         break;
@@ -1024,6 +1175,12 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                 // AEAD (GCM/CCM) authentication failed. Drop the packet WITHOUT advancing the replay
                 // window / ROC, so a single unauthenticated, corrupted or reordered packet cannot desync
                 // the ROC and cause every subsequent packet to fail to decrypt. RFC 3711 section 3.3.
+                outputBufferLength = 0;
+                return ERROR_HMAC_CHECK_FAILED;
+            }
+            catch (AuthenticationTagMismatchException)
+            {
+                // Same as above for the .NET AesGcm path.
                 outputBufferLength = 0;
                 return ERROR_HMAC_CHECK_FAILED;
             }
@@ -1143,7 +1300,7 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                             input.Slice(0, offset).CopyTo(associatedDataRented.AsSpan(0, offset));
                             BinaryPrimitives.WriteUInt32BigEndian(associatedDataRented.AsSpan(offset, 4), index);
                             input.Slice(0, offset).CopyTo(output.Slice(0, offset));
-                            SRTP.Encryption.AEAD.Encrypt(context.PayloadAEAD, true, input.Slice(offset, length - offset), output.Slice(offset), context.Iv12, context.K_e, context.N_tag, associatedDataRented.Slice(0, offset + 4));
+                            context.SealPayload(input.Slice(offset, length - offset), output.Slice(offset), associatedDataRented.Slice(0, offset + 4));
                             length += context.N_tag;
                         }
                         finally
@@ -1186,6 +1343,15 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
             BinaryPrimitives.WriteUInt32BigEndian(output.Slice(length, 4), index);
             length += 4;
 
+            // Authenticated portion ends at E||SRTCP index; the MKI is not covered (RFC 3711 3.4), matching UnprotectRtcp.
+            // Upstream MACed after appending the MKI, so a context with a non-empty MKI could not verify its own SRTCP.
+            var hasAuth = context.Auth != SrtpAuth.NONE;
+            Span<byte> auth = stackalloc byte[SRTP.Authentication.HMAC.HMAC_SHA1_LENGTH];
+            if (hasAuth)
+            {
+                context.GenerateAuthTag(output.Slice(0, length), ReadOnlySpan<byte>.Empty, auth);
+            }
+
             var mki = context.Mki;
             if (mki.Length > 0)
             {
@@ -1193,10 +1359,9 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                 length += mki.Length;
             }
 
-            if (context.Auth != SrtpAuth.NONE)
+            if (hasAuth)
             {
-                var auth = SRTP.Authentication.HMAC.GenerateAuthTag(context.HMAC, output.Slice(0, length));
-                auth.AsSpan(0, context.N_tag).CopyTo(output.Slice(length, context.N_tag));
+                auth.Slice(0, context.N_tag).CopyTo(output.Slice(length, context.N_tag));
                 length += context.N_tag;
             }
 
@@ -1230,9 +1395,12 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                 return ERROR_GENERIC;
             }
 
+            // HMAC profiles: ...||E+index||MKI||tag (RFC 3711 3.4). AEAD: ...||ciphertext+tag||E+index||MKI (RFC 7714 9.1),
+            // as ProtectRtcp writes it. Upstream assumed the HMAC layout for both, so AEAD with an MKI never verified.
+            var tagAfterMki = context.Auth != SrtpAuth.NONE ? context.N_tag : 0;
             for (var i = 0; i < mki.Length; i++)
             {
-                if (inputSpan[length - context.N_tag - mki.Length + i] != mki.Span[i])
+                if (inputSpan[length - tagAfterMki - mki.Length + i] != mki.Span[i])
                 {
                     outputBufferLength = 0;
                     return ERROR_MKI_CHECK_FAILED;
@@ -1255,7 +1423,7 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                 context.ReplayProtection.Add(ssrc, ssrcContext);
             }
 
-            var originalIndex = RtcpReader.SrtcpReadIndex(input, context.N_a > 0 ? (context.N_tag + mki.Length) : 0);
+            var originalIndex = RtcpReader.SrtcpReadIndex(input, tagAfterMki + mki.Length);
             var index = originalIndex;
             var isEncrypted = false;
 
@@ -1267,14 +1435,12 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
 
             if (context.Auth != SrtpAuth.NONE)
             {
-                var auth = SRTP.Authentication.HMAC.GenerateAuthTag(context.HMAC, input.Slice(0, length - context.N_tag - mki.Length));
-                for (var i = 0; i < context.N_tag; i++)
+                Span<byte> auth = stackalloc byte[SRTP.Authentication.HMAC.HMAC_SHA1_LENGTH];
+                context.GenerateAuthTag(inputSpan.Slice(0, length - context.N_tag - mki.Length), ReadOnlySpan<byte>.Empty, auth);
+                if (!CryptographicOperations.FixedTimeEquals(inputSpan.Slice(length - context.N_tag, context.N_tag), auth.Slice(0, context.N_tag)))
                 {
-                    if (inputSpan[length - context.N_tag + i] != auth[i])
-                    {
-                        outputBufferLength = 0;
-                        return ERROR_HMAC_CHECK_FAILED;
-                    }
+                    outputBufferLength = 0;
+                    return ERROR_HMAC_CHECK_FAILED;
                 }
             }
 
@@ -1337,7 +1503,7 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                                     input.Slice(0, offset).CopyTo(associatedDataRented.AsSpan(0, offset));
                                     BinaryPrimitives.WriteUInt32BigEndian(associatedDataRented.AsSpan(offset, 4), originalIndex);
                                     input.Slice(0, offset).CopyTo(output.Slice(0, offset));
-                                    SRTP.Encryption.AEAD.Encrypt(context.PayloadAEAD, false, input.Slice(offset, length - 4 - mki.Length - offset), output.Slice(offset), context.Iv12, context.K_e, context.N_tag, associatedDataRented.Slice(0, offset + 4));
+                                    context.OpenPayload(input.Slice(offset, length - 4 - mki.Length - offset), output.Slice(offset), associatedDataRented.Slice(0, offset + 4));
                                     outputBufferLength = length - 4 - context.N_tag - mki.Length;
                                 }
                                 finally
@@ -1382,6 +1548,12 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
                     // AEAD (GCM/CCM) authentication failed. Drop the packet WITHOUT advancing the replay
                     // window / ROC, so a single unauthenticated, corrupted or reordered packet cannot desync
                     // the ROC and cause every subsequent packet to fail to decrypt. RFC 3711 section 3.3.
+                    outputBufferLength = 0;
+                    return ERROR_HMAC_CHECK_FAILED;
+                }
+                catch (AuthenticationTagMismatchException)
+                {
+                    // Same as above for the .NET AesGcm path.
                     outputBufferLength = 0;
                     return ERROR_HMAC_CHECK_FAILED;
                 }
