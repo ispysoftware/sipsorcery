@@ -94,25 +94,25 @@ namespace SIPSorcery.Net
                     byte packetTypeID = buffer[1];
                     switch (packetTypeID)
                     {
+                        // Each packet is stepped over by its on-wire length from the header. Re-serialising with
+                        // GetBytes() gave a different length whenever the parsed object doesn't hold everything that was
+                        // sent (an SDES keeps only the first chunk's CNAME, so a multi-chunk SDES, one with other items or
+                        // an empty one came out a different size), which desynchronised the rest of the compound packet.
                         case (byte)RTCPReportTypesEnum.SR:
                             SenderReport = new RTCPSenderReport(buffer);
-                            int srLength = (SenderReport != null) ? SenderReport.GetBytes().Length : Int32.MaxValue;
-                            offset += srLength;
+                            offset += (SenderReport.Header.Length + 1) * 4;
                             break;
                         case (byte)RTCPReportTypesEnum.RR:
                             ReceiverReport = new RTCPReceiverReport(buffer);
-                            int rrLength = (ReceiverReport != null) ? ReceiverReport.GetBytes().Length : Int32.MaxValue;
-                            offset += rrLength;
+                            offset += (ReceiverReport.Header.Length + 1) * 4;
                             break;
                         case (byte)RTCPReportTypesEnum.SDES:
                             SDesReport = new RTCPSDesReport(buffer);
-                            int sdesLength = (SDesReport != null) ? SDesReport.GetBytes().Length : Int32.MaxValue;
-                            offset += sdesLength;
+                            offset += (SDesReport.Header.Length + 1) * 4;
                             break;
                         case (byte)RTCPReportTypesEnum.BYE:
                             Bye = new RTCPBye(buffer);
-                            int byeLength = (Bye != null) ? Bye.GetBytes().Length : Int32.MaxValue;
-                            offset += byeLength;
+                            offset += (Bye.Header.Length + 1) * 4;
                             break;
                         case (byte)RTCPReportTypesEnum.RTPFB:
                             var typ = RTCPHeader.ParseFeedbackType(buffer);
@@ -265,25 +265,22 @@ namespace SIPSorcery.Net
                     byte packetTypeID = buffer[1];
                     switch (packetTypeID)
                     {
+                        // On-wire lengths from the header, see the constructor above.
                         case (byte)RTCPReportTypesEnum.SR:
                             rtcpCompoundPacket.SenderReport = new RTCPSenderReport(buffer);
-                            int srLength = (rtcpCompoundPacket.SenderReport != null) ? rtcpCompoundPacket.SenderReport.GetBytes().Length : Int32.MaxValue;
-                            offset += srLength;
+                            offset += (rtcpCompoundPacket.SenderReport.Header.Length + 1) * 4;
                             break;
                         case (byte)RTCPReportTypesEnum.RR:
                             rtcpCompoundPacket.ReceiverReport = new RTCPReceiverReport(buffer);
-                            int rrLength = (rtcpCompoundPacket.ReceiverReport != null) ? rtcpCompoundPacket.ReceiverReport.GetBytes().Length : Int32.MaxValue;
-                            offset += rrLength;
+                            offset += (rtcpCompoundPacket.ReceiverReport.Header.Length + 1) * 4;
                             break;
                         case (byte)RTCPReportTypesEnum.SDES:
                             rtcpCompoundPacket.SDesReport = new RTCPSDesReport(buffer);
-                            int sdesLength = (rtcpCompoundPacket.SDesReport != null) ? rtcpCompoundPacket.SDesReport.GetBytes().Length : Int32.MaxValue;
-                            offset += sdesLength;
+                            offset += (rtcpCompoundPacket.SDesReport.Header.Length + 1) * 4;
                             break;
                         case (byte)RTCPReportTypesEnum.BYE:
                             rtcpCompoundPacket.Bye = new RTCPBye(buffer);
-                            int byeLength = (rtcpCompoundPacket.Bye != null) ? rtcpCompoundPacket.Bye.GetBytes().Length : Int32.MaxValue;
-                            offset += byeLength;
+                            offset += (rtcpCompoundPacket.Bye.Header.Length + 1) * 4;
                             break;
                         case (byte)RTCPReportTypesEnum.RTPFB:
                             var typ = RTCPHeader.ParseFeedbackType(buffer);

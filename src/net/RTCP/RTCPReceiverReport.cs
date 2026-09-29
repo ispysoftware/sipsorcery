@@ -94,8 +94,11 @@ namespace SIPSorcery.Net
             ReceptionReports = new List<ReceptionReportSample>();
             SSRC = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(4));
 
+            // Report blocks must lie inside this packet (its on-wire length, and the buffer). A count larger than the
+            // blocks present used to throw, which dropped the whole compound packet, NACKs and PLIs included.
+            int packetEnd = Math.Min(packet.Length, (Header.Length + 1) * 4);
             int rrIndex = 8;
-            for (int i = 0; i < Header.ReceptionReportCount; i++)
+            for (int i = 0; i < Header.ReceptionReportCount && rrIndex + (i + 1) * ReceptionReportSample.PAYLOAD_SIZE <= packetEnd; i++)
             {
                 var rr = new ReceptionReportSample(packet.Slice(rrIndex + i * ReceptionReportSample.PAYLOAD_SIZE));
                 ReceptionReports.Add(rr);

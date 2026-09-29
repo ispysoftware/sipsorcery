@@ -111,5 +111,28 @@ namespace SIPSorcery.Net.UnitTests
 
             Assert.NotNull(cp);
         }
+
+        /// <summary>
+        /// An SDES with two chunks is stepped over by its on-wire length, so the packet after it is still parsed.
+        /// Re-serialising the SDES (first chunk only) used to give 16 bytes instead of 28 and lose the BYE.
+        /// </summary>
+        [Fact]
+        public void MultiChunkSdesDoesNotDesyncCompoundPacket()
+        {
+            var buffer = TypeExtensions.ParseHexStr(
+                "80C9000100000001" +                                                // RR, no reception reports
+                "82CA0006" +                                                        // SDES, 2 chunks, 28 bytes
+                "111111110104616263640000" +                                        //   SSRC 0x11111111, CNAME "abcd"
+                "222222220104656667680000" +                                        //   SSRC 0x22222222, CNAME "efgh"
+                "81CB000133333333");                                                // BYE, SSRC 0x33333333
+
+            var cp = new RTCPCompoundPacket(buffer);
+            Assert.Equal("abcd", cp.SDesReport.CNAME);
+            Assert.NotNull(cp.Bye);
+            Assert.Equal(0x33333333u, cp.Bye.SSRC);
+
+            Assert.True(RTCPCompoundPacket.TryParse(buffer, null, out int consumed));
+            Assert.Equal(buffer.Length, consumed);
+        }
     }
 }
