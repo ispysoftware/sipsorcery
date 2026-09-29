@@ -43,7 +43,8 @@ namespace SIPSorcery.Net
         public STUNErrorCodeAttribute(int errorCode, string reasonPhrase)
             : base(STUNAttributeTypesEnum.ErrorCode, null)
         {
-            ErrorClass = errorCode < 700 ? Convert.ToByte(ErrorCode / 100) : (byte)0x00;
+            // The parameter, not the ErrorCode property (still 0 here), which made the class 0 for every code.
+            ErrorClass = errorCode < 700 ? Convert.ToByte(errorCode / 100) : (byte)0x00;
             ErrorNumber = Convert.ToByte(errorCode % 100);
             ReasonPhrase = reasonPhrase;
         }

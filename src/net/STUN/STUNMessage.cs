@@ -208,16 +208,18 @@ namespace SIPSorcery.Net
             return buffer;
         }
 
-        public new string ToString()
+        // override, not new: with new, anything formatting the message as an object (string interpolation, structured
+        // logging) got the type name instead of this description.
+        public override string ToString()
         {
-            string messageDescr = "STUN Message: " + Header.MessageType.ToString() + ", length=" + Header.MessageLength;
+            var messageDescr = new StringBuilder("STUN Message: ").Append(Header.MessageType).Append(", length=").Append(Header.MessageLength);
 
             foreach (STUNAttribute attribute in Attributes)
             {
-                messageDescr += "\n " + attribute.ToString();
+                messageDescr.Append("\n ").Append(attribute.ToString());
             }
 
-            return messageDescr;
+            return messageDescr.ToString();
         }
 
         /// <summary>

@@ -299,7 +299,9 @@ namespace SIPSorcery.Net
 
         public override bool Equals(object obj)
         {
-            return Equals(this, (STUNUri)obj);
+            // Equals(this, obj) resolved to object.Equals(object, object), which calls back into this override, so two
+            // distinct instances recursed until the stack overflowed (upstream 5b106aa94).
+            return obj is STUNUri other && this == other;
         }
 
         public static bool operator ==(STUNUri uri1, STUNUri uri2)
@@ -314,6 +316,12 @@ namespace SIPSorcery.Net
             }
             else if (uri1.Host == null || uri2.Host == null)
             {
+                return false;
+            }
+            else if (!string.Equals(uri1.Host, uri2.Host, StringComparison.OrdinalIgnoreCase))
+            {
+                // The host was never compared, so URIs for different servers on the same port and transport were equal.
+                // DNS hostnames are case-insensitive (RFC 4343).
                 return false;
             }
             else if (uri1.Scheme != uri2.Scheme)
@@ -343,7 +351,8 @@ namespace SIPSorcery.Net
 
         public override int GetHashCode()
         {
-            return HashCode.Combine(Scheme, Transport, Host, Port, ExplicitPort);
+            // Host hashed with the same case-insensitive semantics as operator ==.
+            return HashCode.Combine(Scheme, Transport, Host == null ? 0 : StringComparer.OrdinalIgnoreCase.GetHashCode(Host), Port, ExplicitPort);
         }
     }
 }
