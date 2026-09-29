@@ -280,6 +280,8 @@ namespace SIPSorcery.Net
             Span<byte> recvBuffer = recvBufferArray.AsSpan();
 #endif
 
+            bool dtlsClosed = false;
+
             while (!_isClosed.HasOccurred)
             {
                 try
@@ -355,7 +357,16 @@ namespace SIPSorcery.Net
                 catch (TlsFatalAlert alert) when (alert.InnerException is SocketException)
                 {
                     var sockExcp = alert.InnerException as SocketException;
-                    logger.LogWarning($"SCTP RTCSctpTransport receive socket failure {sockExcp.SocketErrorCode}.");
+                    if (sockExcp.SocketErrorCode == SocketError.NotConnected || _isClosed.HasOccurred)
+                    {
+                        // DtlsSrtpTransport.Close fails pending receives with NotConnected: a normal shutdown.
+                        logger.LogDebug("SCTP RTCSctpTransport DTLS transport closed, receive thread exiting.");
+                        dtlsClosed = true;
+                    }
+                    else
+                    {
+                        logger.LogWarning($"SCTP RTCSctpTransport receive socket failure {sockExcp.SocketErrorCode}.");
+                    }
                     break;
                 }
                 catch (Exception excp)
@@ -365,7 +376,7 @@ namespace SIPSorcery.Net
                 }
             }
 
-            if (!_isClosed.HasOccurred)
+            if (!_isClosed.HasOccurred && !dtlsClosed)
             {
                 logger.LogWarning($"SCTP association {RTCSctpAssociation.ID} receive thread stopped.");
             }

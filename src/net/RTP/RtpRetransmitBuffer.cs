@@ -9,9 +9,9 @@
  *   sequence number) so it is SRTP-protected fresh and picks up a new
  *   transport-wide-cc seqnum, keeping the bandwidth estimator honest.
  *
- *   SRTP rollover fencing: the sender-side SrtpCryptoContext encrypts with
- *   its CURRENT rollover counter (ROC) and increments it when seq 0xFFFF is
- *   sent. Re-protecting a packet from before the last ROC increment would
+ *   SRTP rollover fencing: the sender-side SrtpContext encrypts with the
+ *   SSRC's CURRENT rollover counter (ROC, SsrcSrtpContext.OutboundRoc) and
+ *   increments it when seq 0xFFFF is sent. Re-protecting a packet from before the last ROC increment would
  *   use the wrong keystream (the receiver would fail auth and drop it), and
  *   re-sending seq 0xFFFF itself would increment the sender ROC a second
  *   time and desynchronise the entire stream. Entries therefore record a

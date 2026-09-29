@@ -13,10 +13,6 @@
 // BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
 //-----------------------------------------------------------------------------
 
-using SIPSorcery.Sys;
-using System.Collections.Concurrent;
-using Microsoft.Extensions.Logging;
-
 namespace SIPSorcery.Net
 {
     public class SecureContext

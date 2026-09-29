@@ -92,7 +92,7 @@ namespace SIPSorcery.Net.IntegrationTests
 #endif
             var cert = new X509Certificate2("certs/localhost.pfx", string.Empty, X509KeyStorageFlags.Exportable);
             Assert.NotNull(cert);
-            var key = DtlsUtils.LoadPrivateKeyResource(cert);
+            var key = Org.BouncyCastle.Security.DotNetUtilities.GetKeyPair(cert.PrivateKey).Private;
             Assert.NotNull(key);
         }
 
@@ -118,7 +118,8 @@ namespace SIPSorcery.Net.IntegrationTests
             Assert.NotNull(coreFxCert);
             Assert.NotNull(coreFxCert.PrivateKey);
 
-            string coreFxFingerprint = DtlsUtils.Fingerprint(crypto, coreFxCert).ToString();
+            var coreFxBouncyCert = Org.BouncyCastle.Security.DotNetUtilities.FromX509Certificate(coreFxCert);
+            string coreFxFingerprint = DtlsUtils.Fingerprint("sha-256", new BcTlsCertificate(crypto, Org.BouncyCastle.Asn1.X509.X509CertificateStructure.GetInstance(coreFxBouncyCert.GetEncoded()))).ToString();
             logger.LogDebug("Core FX certificate fingerprint {CoreFxFingerprint}.", coreFxFingerprint);
 
             var bcCert = Org.BouncyCastle.Security.DotNetUtilities.FromX509Certificate(coreFxCert);

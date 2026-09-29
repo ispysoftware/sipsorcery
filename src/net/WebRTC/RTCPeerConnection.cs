@@ -46,6 +46,7 @@ using SIPSorcery.Sys;
 using Org.BouncyCastle.Tls;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
 using SIPSorcery.net.RTP;
+using SIPSorcery.Net.SharpSRTP.DTLS;
 
 namespace SIPSorcery.Net
 {
@@ -372,7 +373,7 @@ namespace SIPSorcery.Net
             }
 
             DtlsCertificateFingerprint = DtlsUtils.Fingerprint(_dtlsCertificate);
-            DtlsCertificateSignatureAlgorithm = DtlsUtils.GetSignatureAlgorithm(_dtlsCertificate.GetCertificateAt(0));
+            DtlsCertificateSignatureAlgorithm = new Org.BouncyCastle.X509.X509Certificate(_dtlsCertificate.GetCertificateAt(0).GetEncoded()).SigAlgName;
 
             logger.LogDebug($"RTCPeerConnection created with DTLS certificate with fingerprint {DtlsCertificateFingerprint} and signature algorithm {DtlsCertificateSignatureAlgorithm}.");
 
@@ -466,13 +467,15 @@ namespace SIPSorcery.Net
 
                     bool disableDtlsExtendedMasterSecret = _configuration != null && _configuration.X_DisableExtendedMasterSecretKey;
 
-
+                    // SharpSRTP picks its cipher suites and signer from this, so it must match the certificate's key
+                    // (an RSA key can arrive via certificates2; the self-signed default is ECDSA).
+                    short dtlsSignatureAlgorithm = _dtlsPrivateKey is Org.BouncyCastle.Crypto.Parameters.RsaKeyParameters ? SignatureAlgorithm.rsa : SignatureAlgorithm.ecdsa;
 
                     _dtlsHandle = new DtlsSrtpTransport(
                                 IceRole == IceRolesEnum.active ?
-                                new DtlsSrtpClient(_crypto, _dtlsCertificate, _dtlsPrivateKey)
+                                new WebRtcDtlsSrtpClient(_crypto, _dtlsCertificate, _dtlsPrivateKey, dtlsSignatureAlgorithm)
                                 { ForceUseExtendedMasterSecret = !disableDtlsExtendedMasterSecret } :
-                                new DtlsSrtpServer(_crypto, _dtlsCertificate, _dtlsPrivateKey)
+                                new WebRtcDtlsSrtpServer(_crypto, _dtlsCertificate, _dtlsPrivateKey, dtlsSignatureAlgorithm)
                                 { ForceUseExtendedMasterSecret = !disableDtlsExtendedMasterSecret }
                                 );
 
@@ -1750,11 +1753,10 @@ namespace SIPSorcery.Net
 
             var rtpChannel = PrimaryStream.GetRTPChannel();
 
-            // The event handler MUST be synchronous to accept the ReadOnlySpan.
-            // Inside, it copies the data and calls an async helper method.
+            // The transport hands over its own copy of each datagram, so it can be sent asynchronously.
             dtlsHandle.OnDataReady += (buf) =>
             {
-                SendDtlsPacketAsync(rtpChannel, PrimaryStream.DestinationEndPoint, buf.ToArray());
+                SendDtlsPacketAsync(rtpChannel, PrimaryStream.DestinationEndPoint, buf);
             };
 
             // Run the blocking DoHandshake method on a background thread.
@@ -1807,9 +1809,9 @@ namespace SIPSorcery.Net
         /// <param name="alertLevel">The level of the alert: warning or critical.</param>
         /// <param name="alertType">The type of the alert.</param>
         /// <param name="alertDescription">An optional description for the alert.</param>
-        private void OnDtlsAlert(AlertLevelsEnum alertLevel, AlertTypesEnum alertType, string alertDescription)
+        private void OnDtlsAlert(TlsAlertLevelsEnum alertLevel, TlsAlertTypesEnum alertType, string alertDescription)
         {
-            if (alertType == AlertTypesEnum.close_notify)
+            if (alertType == TlsAlertTypesEnum.CloseNotify)
             {
                 logger.LogDebug($"SCTP closing transport as a result of DTLS close notification.");
 
