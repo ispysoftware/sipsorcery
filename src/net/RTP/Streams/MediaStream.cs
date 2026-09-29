@@ -568,7 +568,7 @@ namespace SIPSorcery.net.RTP
                     wirePacket = BuildRtpPacket(rentedBuffer, extensions, payload.AsSpan(0, length), seq, timestamp, markerBit, payloadType, out packetLength);
                 }
 
-                await SendBuiltRtpPacketAsync(wirePacket, packetLength, seq, timestamp).ConfigureAwait(false);
+                await SendBuiltRtpPacketAsync(wirePacket, packetLength, seq, timestamp, isRetransmission: true).ConfigureAwait(false);
             }
             finally
             {
@@ -725,16 +725,22 @@ namespace SIPSorcery.net.RTP
         /// <summary>
         /// Asynchronous half of an RTP send: puts a packet built by <see cref="BuildRtpPacket"/>
         /// on the wire (outside <see cref="_sendLock"/>) and updates the RTCP sender stats.
+        /// NACK retransmissions don't update the sender stats: they carry an old RTP timestamp,
+        /// which the next Sender Report would pair with the current NTP time (skewing the
+        /// receiver's A/V sync mapping), and they are duplicates, not new media packets/octets.
         /// </summary>
-        private async Task SendBuiltRtpPacketAsync(ArraySegment<byte> wirePacket, int packetLength, ushort seq, uint timestamp)
+        private async Task SendBuiltRtpPacketAsync(ArraySegment<byte> wirePacket, int packetLength, ushort seq, uint timestamp, bool isRetransmission = false)
         {
             if (wirePacket.Array != null)
             {
                 await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, DestinationEndPoint, wirePacket).ConfigureAwait(false);
             }
 
-            m_lastRtpTimestamp = timestamp;
-            RtcpSession?.RecordRtpPacketSend(packetLength, seq, timestamp);
+            if (!isRetransmission)
+            {
+                m_lastRtpTimestamp = timestamp;
+                RtcpSession?.RecordRtpPacketSend(packetLength, seq, timestamp);
+            }
         }
 
 
