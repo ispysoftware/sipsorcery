@@ -124,7 +124,8 @@ namespace SIPSorcery.Net
         private const int ICE_PASSWORD_LENGTH = 24;
         private const int MAX_CHECKLIST_ENTRIES = 25;       // Maximum number of entries that can be added to the checklist of candidate pairs.
         private const string MDNS_TLD = ".local";           // Top Level Domain name for multicast lookups as per RFC6762.
-        private const int CONNECTED_CHECK_PERIOD = 3;       // The period in seconds to send STUN connectivity checks once connected. 
+        private const int CONNECTED_CHECK_PERIOD = 3;       // The period in seconds to send STUN connectivity checks once connected.
+        private const int TLS_SETUP_TIMEOUT_SECONDS = 10;   // Limit on the TCP connect plus TLS handshake to a TURNS/STUNS server.
         public const string SDP_MID = "0";
         public const int SDP_MLINE_INDEX = 0;
 
@@ -167,6 +168,16 @@ namespace SIPSorcery.Net
 
         internal ConcurrentDictionary<STUNUri, IceServer> _iceServerConnections;
         private ConcurrentDictionary<STUNUri, SslStream> _tlsStreams = new ConcurrentDictionary<STUNUri, SslStream>();
+
+        // Per-URI async gate for TURNS/STUNS. SslStream throws NotSupportedException on a nested write, and the
+        // lazy connect + handshake must only happen once, so every send on a TLS connection is serialised here.
+        // Never removed: one gate per URI for the life of the channel.
+        private ConcurrentDictionary<STUNUri, SemaphoreSlim> _tlsSendGates = new ConcurrentDictionary<STUNUri, SemaphoreSlim>();
+
+        // TURNS/STUNS URIs whose TLS connection has ended (handshake failure, read error or remote close). The
+        // socket has already carried a TLS session so it can't be re-wrapped, and a TURN allocation belongs to
+        // the connection it was made on, so sends to these URIs fail rather than re-handshaking.
+        private ConcurrentDictionary<STUNUri, bool> _tlsClosedUris = new ConcurrentDictionary<STUNUri, bool>();
 
         private IceServer _activeIceServer;
 
@@ -404,36 +415,47 @@ namespace SIPSorcery.Net
             // Create TCP Socket to implement TURN Control
             // Take a note that TURN Control will only use TCP for CreatePermissions/Allocate/BindRequests/Data
             // Ice Candidates returned by relay will always be UDP Based
-            var tcpIceServers = _iceServers != null ?
-                                    _iceServers.FindAll(a =>
-                                       a != null &&
-                                       (a.urls.Contains(STUNUri.SCHEME_TRANSPORT_TCP) ||
-                                       a.urls.Contains(STUNUri.SCHEME_TRANSPORT_TLS))) :
-                                    new List<RTCIceServer>();
-            var supportTcp = tcpIceServers != null && tcpIceServers.Count > 0;
+            //
+            // Classify TCP ICE servers by the parsed transport, not by string-matching the raw URL, so secure
+            // schemes without an explicit "?transport=" (e.g. "turns:host:443", TLS over TCP by default) are
+            // included. Each URL is parsed the same way InitialiseIceServers does so the socket keys match the
+            // ICE server keys.
+            var tcpIceServerUris = new List<STUNUri>();
+            if (_iceServers != null)
+            {
+                foreach (var iceServer in _iceServers)
+                {
+                    if (iceServer?.urls == null)
+                    {
+                        continue;
+                    }
+
+                    foreach (string url in iceServer.urls.Split(','))
+                    {
+                        if (!String.IsNullOrWhiteSpace(url) && STUNUri.TryParse(url, out var tcpUri) && tcpUri.Protocol == ProtocolType.Tcp)
+                        {
+                            tcpIceServerUris.Add(tcpUri);
+                        }
+                    }
+                }
+            }
+            var supportTcp = tcpIceServerUris.Count > 0;
             if (supportTcp)
             {
                 // Init one TCP Socket per IceServer as we need to connect to proper use a TcpSocket (unfortunally)
                 RtpTcpSocketByUri = new Dictionary<STUNUri, Socket>();
-                foreach (var tcpIceServer in tcpIceServers)
+                foreach (var uri in tcpIceServerUris)
                 {
-                    var serverUrl = tcpIceServer.urls;
-                    STUNUri.TryParse(serverUrl, out STUNUri uri);
-                    if (uri != null && !RtpTcpSocketByUri.ContainsKey(uri))
+                    if (!RtpTcpSocketByUri.ContainsKey(uri))
                     {
+                        NetServices.CreateRtpSocket(false, ProtocolType.Tcp, bindAddress, bindPort, rtpPortRange, true, true, out var rtpTcpSocket, out _);
 
-                        if (uri != null)
+                        if (rtpTcpSocket == null)
                         {
-                            NetServices.CreateRtpSocket(false, ProtocolType.Tcp, bindAddress, bindPort, rtpPortRange, true, true, out var rtpTcpSocket, out _);
-
-                            if (rtpTcpSocket == null)
-                            {
-                                throw new ApplicationException("The RTP channel was not able to create an RTP socket.");
-                            }
-
-
-                            RtpTcpSocketByUri.Add(uri, rtpTcpSocket);
+                            throw new ApplicationException("The RTP channel was not able to create an RTP socket.");
                         }
+
+                        RtpTcpSocketByUri.Add(uri, rtpTcpSocket);
                     }
                 }
             }
@@ -621,6 +643,48 @@ namespace SIPSorcery.Net
                 _refreshTurnTimer?.Dispose();
                 OnClosed -= CloseTcp;
                 base.Close("RtpIceChannel is closing");
+                CloseTls();
+            }
+        }
+
+        /// <summary>
+        /// Closes the TURNS/STUNS connections. They have no IceTcpReceiver to close them, and a TLS read loop only
+        /// checks IsClosed between reads, so closing the sockets is what ends the loops and any pending sends.
+        /// Called after the base close so IsClosed is already set and the loops exit without logging an error.
+        /// </summary>
+        private void CloseTls()
+        {
+            foreach (var tlsStream in _tlsStreams)
+            {
+                try
+                {
+                    tlsStream.Value.Dispose();
+                }
+                catch (Exception excp)
+                {
+                    logger.LogDebug($"Exception disposing TLS stream for {tlsStream.Key}. {excp.Message}");
+                }
+            }
+
+            // Sockets for TLS URIs that never got a stream (e.g. mid connect or handshake).
+            var tcpSockets = RtpTcpSocketByUri;
+            if (tcpSockets != null)
+            {
+                foreach (var pair in tcpSockets)
+                {
+                    if (pair.Key != null && pair.Value != null &&
+                        (pair.Key.Scheme == STUNSchemesEnum.turns || pair.Key.Scheme == STUNSchemesEnum.stuns))
+                    {
+                        try
+                        {
+                            pair.Value.Close();
+                        }
+                        catch (Exception excp)
+                        {
+                            logger.LogDebug($"Exception closing TLS socket for {pair.Key}. {excp.Message}");
+                        }
+                    }
+                }
             }
         }
 
@@ -2345,41 +2409,84 @@ namespace SIPSorcery.Net
                 if (isTls)
                 {
                     // --- TLS PATH ---
-                    if (!_tlsStreams.TryGetValue(iceServer._uri, out SslStream sslStream))
+                    // Serialise the lazy connect/handshake and every write on this TLS connection (see _tlsSendGates).
+                    var sendGate = _tlsSendGates.GetOrAdd(iceServer._uri, _ => new SemaphoreSlim(1, 1));
+                    await sendGate.WaitAsync().ConfigureAwait(false);
+                    try
                     {
-                        // Connect the raw socket if needed
-                        if (!sendSocket.Connected)
+                        if (IsClosed) return SocketError.Disconnecting;
+
+                        if (_tlsClosedUris.ContainsKey(iceServer._uri))
                         {
-                            await sendSocket.ConnectAsync(dstEndPoint).ConfigureAwait(false);
+                            // The TLS connection has ended and can't be resumed on this socket. Reporting the failure
+                            // lets the caller record it against the ICE server so the checklist moves on.
+                            return SocketError.NotConnected;
                         }
 
-                        // Wrap in SslStream
-                        // Note: We leave validation permissive (true) for testing, but you can restrict it.
-                        sslStream = new SslStream(new NetworkStream(sendSocket, false), false,
-                            (sender, cert, chain, errors) => true, null);
-
-                        try
+                        if (!_tlsStreams.TryGetValue(iceServer._uri, out SslStream sslStream))
                         {
-                            // Perform SSL Handshake
-                            // We assume the hostname in the URI matches the cert
-                            await sslStream.AuthenticateAsClientAsync(iceServer._uri.Host).ConfigureAwait(false);
+                            // The connect and handshake run under the send gate, and the ICE server check that triggers
+                            // them holds _iceServerLock, so they are time limited. A server that accepts TCP but never
+                            // completes TLS would otherwise stall this URI's sends and all further ICE server checks.
+                            sslStream = null;
+                            using (var setupCts = new CancellationTokenSource(TimeSpan.FromSeconds(TLS_SETUP_TIMEOUT_SECONDS)))
+                            {
+                                try
+                                {
+                                    // Connect the raw socket if needed
+                                    if (!sendSocket.Connected)
+                                    {
+                                        await sendSocket.ConnectAsync(dstEndPoint, setupCts.Token).ConfigureAwait(false);
+                                    }
 
-                            _tlsStreams.TryAdd(iceServer._uri, sslStream);
+                                    // Wrap in SslStream. The stream owns the socket so disposing it closes the socket,
+                                    // which also faults any read or write still pending on it.
+                                    sslStream = new SslStream(new NetworkStream(sendSocket, true), false);
+
+                                    // Perform SSL Handshake
+                                    // We assume the hostname in the URI matches the cert
+                                    // Note: We leave validation permissive (true) for testing, but you can restrict it.
+                                    var authOptions = new SslClientAuthenticationOptions
+                                    {
+                                        TargetHost = iceServer._uri.Host,
+                                        RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true
+                                    };
+                                    await sslStream.AuthenticateAsClientAsync(authOptions, setupCts.Token).ConfigureAwait(false);
+                                }
+                                catch (Exception tlsEx)
+                                {
+                                    logger.LogError($"TLS connect/handshake failed for {iceServer._uri}: {tlsEx.Message}");
+
+                                    // The socket may have a partial connect or TLS exchange on it so setup can't be retried on it.
+                                    _tlsClosedUris.TryAdd(iceServer._uri, true);
+                                    try
+                                    {
+                                        if (sslStream != null) sslStream.Dispose();
+                                        else sendSocket.Close();
+                                    }
+                                    catch (Exception disposeExcp)
+                                    {
+                                        logger.LogDebug($"Exception closing TLS connection for {iceServer._uri}. {disposeExcp.Message}");
+                                    }
+                                    return SocketError.SocketError;
+                                }
+                            }
+
+                            _tlsStreams[iceServer._uri] = sslStream;
                             logger.LogDebug($"TLS Handshake successful for {iceServer._uri}");
 
-                            // Start a dedicated read loop for this SSL stream
+                            // Start the single read loop for this SSL stream
                             _ = StartTlsReadLoop(iceServer._uri, sslStream, dstEndPoint);
                         }
-                        catch (Exception tlsEx)
-                        {
-                            logger.LogError($"TLS Handshake failed for {iceServer._uri}: {tlsEx.Message}");
-                            return SocketError.SocketError;
-                        }
-                    }
 
-                    // Write to the SSL Stream
-                    await sslStream.WriteAsync(buffer).ConfigureAwait(false);
-                    return SocketError.Success;
+                        // Write to the SSL Stream
+                        await sslStream.WriteAsync(buffer).ConfigureAwait(false);
+                        return SocketError.Success;
+                    }
+                    finally
+                    {
+                        sendGate.Release();
+                    }
                 }
                 else
                 {
@@ -2463,9 +2570,19 @@ namespace SIPSorcery.Net
                             // Remove from buffer
                             streamBuffer.RemoveRange(0, totalPacketLength);
 
-                            // Process the packet
-                            var packetMemory = new Memory<byte>(packetBytes);
-                            OnRTPPacketReceived(null, 0, remoteEndPoint, packetMemory);
+                            // Process the packet. The framing above has already consumed exactly this packet's bytes,
+                            // so one that can't be processed is dropped without losing the stream position. Letting
+                            // it unwind would end this loop, and with it the TLS connection, for the rest of the
+                            // session (see upstream GHSA-6848-qmp4-652w).
+                            try
+                            {
+                                var packetMemory = new Memory<byte>(packetBytes);
+                                OnRTPPacketReceived(null, 0, remoteEndPoint, packetMemory);
+                            }
+                            catch (Exception packetExcp)
+                            {
+                                logger.LogWarning($"RTPIceChannel dropped a packet received over TLS from {uri} that could not be processed. {packetExcp.Message}");
+                            }
                         }
                         else
                         {
@@ -2489,7 +2606,19 @@ namespace SIPSorcery.Net
             }
             finally
             {
+                // The connection is finished: mark it closed before removing the stream so a send that takes the
+                // gate next fails instead of wrapping the already used socket in a new SslStream. The stream owns
+                // the socket, so disposing it closes the socket and faults any write still blocked on it.
+                _tlsClosedUris.TryAdd(uri, true);
                 _tlsStreams.TryRemove(uri, out _);
+                try
+                {
+                    sslStream.Dispose();
+                }
+                catch (Exception disposeExcp)
+                {
+                    logger.LogDebug($"Exception disposing TLS stream for {uri}. {disposeExcp.Message}");
+                }
             }
         }
 
