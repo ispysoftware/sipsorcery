@@ -364,6 +364,9 @@ namespace SIPSorcery.Net
                 SctpSackChunk sack = new SctpSackChunk(_lastInOrderTSN, _receiveWindow);
                 sack.GapAckBlocks = GetForwardTSNGaps();
                 sack.DuplicateTSN.AddRange(_duplicateTSN.Keys.GetEnumerator());
+                // RFC 4960 6.2: a SACK reports the duplicates received since the previous SACK. Without this the list
+                // (and every SACK) grew for the life of the association, eventually past the MTU and the DTLS record limit.
+                _duplicateTSN.Clear();
                 return sack;
             }
             else

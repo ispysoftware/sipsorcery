@@ -63,6 +63,12 @@ namespace SIPSorcery.Net
         /// </summary>
         public const int RTO_MAX_MILLISECONDS = 20000;
 
+        /// <summary>
+        /// The maximum time Close waits for the send thread to exit. If it has not exited by then
+        /// the send thread releases the queued chunks itself when it does.
+        /// </summary>
+        private const int CLOSE_JOIN_TIMEOUT_MILLISECONDS = 2000;
+
         private static ILogger logger = LogFactory.CreateLogger<SctpDataSender>();
 
         /// <summary>
@@ -76,6 +82,7 @@ namespace SIPSorcery.Net
         private bool _gotFirstSACK;
         private bool _isStarted;
         private Once _closed;
+        private Once _resourcesReleased;
         private Thread _sendThread;
         private int _lastAckedDataChunkSize;
         private OnOff _inRetransmitMode;
@@ -453,11 +460,44 @@ namespace SIPSorcery.Net
                 _closeCts.Cancel();
                 _sendQueue.CompleteAdding();
 
-                if (_sendThread != null && _sendThread.IsAlive)
-                {
-                    _sendThread.Join();
-                }
+                // Wake the send thread so it sees the closed flag now rather than at the end of its current wait.
+                _senderMre.Set();
 
+                var sendThread = _sendThread;
+                if (sendThread == null)
+                {
+                    // The send thread never started so there is nobody else to release the chunks.
+                    ReleaseResources();
+                }
+                else if (sendThread != Thread.CurrentThread)
+                {
+                    // The send thread releases the chunks as it exits. If it is closed from within its own
+                    // send callback, or does not exit in time, it is left to do that when it gets there.
+                    try
+                    {
+                        if (!sendThread.Join(CLOSE_JOIN_TIMEOUT_MILLISECONDS))
+                        {
+                            logger.LogWarning("SCTP association data send thread for association {ID} did not stop within {Timeout}ms of close.",
+                                _associationID, CLOSE_JOIN_TIMEOUT_MILLISECONDS);
+                        }
+                    }
+                    catch (ThreadStateException)
+                    {
+                        // StartSending has assigned the thread but not yet started it. Once started it sees the
+                        // closed flag on its first loop check and releases the chunks as it exits.
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns the unacknowledged and unsent chunks to the pool once the sender is closed. Only called
+        /// from the send thread as it exits, or from Close if the send thread never started.
+        /// </summary>
+        private void ReleaseResources()
+        {
+            if (_resourcesReleased.TryMarkOccurred())
+            {
                 // Dispose any chunks that have been sent but not yet acknowledged.
                 foreach (var chunk in _unconfirmedChunks.Values)
                 {
@@ -643,6 +683,13 @@ namespace SIPSorcery.Net
             {
                 _senderMre.Reset();
 
+                // Re-check after the Reset: if Close marked and signalled between the loop check and the Reset,
+                // the Reset has swallowed its wake-up signal.
+                if (_closed.HasOccurred)
+                {
+                    break;
+                }
+
                 var outstandingBytes = (uint)_outstandingBytes;
                 // DateTime.Now calls have been a tiny bit expensive in the past so get a small saving by only
                 // calling once per loop.
@@ -758,6 +805,8 @@ namespace SIPSorcery.Net
                 int wait = GetSendWaitMilliseconds();
                 _senderMre.Wait(wait);
             }
+
+            ReleaseResources();
 
             logger.LogDebug("SCTP association data send thread stopped for association {ID}.", _associationID);
         }
