@@ -21,8 +21,6 @@ using System.Collections.Generic;
 using Microsoft.Extensions.Logging;
 
 using SIPSorcery.Sys;
-using Small.Collections;
-using TypeNum;
 
 namespace SIPSorcery.Net
 {
@@ -106,6 +104,12 @@ namespace SIPSorcery.Net
         /// The maximum size of an SCTP fragmented message.
         /// </summary>
         private const int MAX_FRAME_SIZE = 262144;
+
+        /// <summary>
+        /// The most duplicate TSNs reported in one SACK (usrsctp uses the same limit), so a burst of
+        /// retransmissions can't make the SACK outgrow the MTU.
+        /// </summary>
+        private const int MAX_DUPLICATE_TSN_REPORTS = 20;
 
         private static ILogger logger = LogFactory.CreateLogger<SctpDataReceiver>();
 
@@ -247,6 +251,10 @@ namespace SIPSorcery.Net
                 logger.LogDebug("SCTP received an old data chunk with {TSN} " +
                     "TSN when the expected TSN was {LastInOrderTSN}, ignoring.",
                     dataChunk.TSN, _lastInOrderTSN + 1);
+
+                // Already acknowledged: this is the usual duplicate (a retransmission after our SACK was lost), and
+                // the next SACK reports it (RFC 9260 6.2).
+                RecordDuplicateTSN(dataChunk.TSN);
             }
             else if (!_forwardTSN.ContainsKey(dataChunk.TSN))
             {
@@ -326,14 +334,7 @@ namespace SIPSorcery.Net
             else
             {
                 logger.LogTrace("SCTP duplicate TSN received for {TSN}.", dataChunk.TSN);
-                if (!_duplicateTSN.ContainsKey(dataChunk.TSN))
-                {
-                    _duplicateTSN.Add(dataChunk.TSN, 1);
-                }
-                else
-                {
-                    _duplicateTSN[dataChunk.TSN] = _duplicateTSN[dataChunk.TSN] + 1;
-                }
+                RecordDuplicateTSN(dataChunk.TSN);
             }
 
             if (!frame.IsEmpty() && !dataChunk.Unordered)
@@ -363,7 +364,18 @@ namespace SIPSorcery.Net
             {
                 SctpSackChunk sack = new SctpSackChunk(_lastInOrderTSN, _receiveWindow);
                 sack.GapAckBlocks = GetForwardTSNGaps();
-                sack.DuplicateTSN.AddRange(_duplicateTSN.Keys.GetEnumerator());
+
+                // Each copy received beyond the first is listed once (RFC 9260 3.3.4). Added in place on the field:
+                // the old AddRange extension took the (struct) list by value, so the duplicates went into a copy and
+                // no SACK ever reported any.
+                foreach (var duplicate in _duplicateTSN)
+                {
+                    for (int i = 0; i < duplicate.Value && sack.DuplicateTSN.Count < MAX_DUPLICATE_TSN_REPORTS; i++)
+                    {
+                        sack.DuplicateTSN.Add(duplicate.Key);
+                    }
+                }
+
                 // RFC 4960 6.2: a SACK reports the duplicates received since the previous SACK. Without this the list
                 // (and every SACK) grew for the life of the association, eventually past the MTU and the DTLS record limit.
                 _duplicateTSN.Clear();
@@ -376,14 +388,23 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
+        /// Records a DATA chunk received again, to be reported in the next SACK.
+        /// </summary>
+        private void RecordDuplicateTSN(uint tsn)
+        {
+            _duplicateTSN.TryGetValue(tsn, out int count);
+            _duplicateTSN[tsn] = count + 1;
+        }
+
+        /// <summary>
         /// Gets a list of the gaps in the forward TSN records. Typically the TSN gap
         /// reports are used in SACK chunks to inform the remote peer which DATA chunk
         /// TSNs have not yet been received.
         /// </summary>
         /// <returns>A list of TSN gap blocks. An empty list means there are no gaps.</returns>
-        internal SmallList<N8<SctpTsnGapBlock>, SctpTsnGapBlock> GetForwardTSNGaps()
+        internal InlineList<SctpTsnGapBlock> GetForwardTSNGaps()
         {
-            var gaps = new SmallList<N8<SctpTsnGapBlock>, SctpTsnGapBlock>();
+            var gaps = new InlineList<SctpTsnGapBlock>();
 
             // Can't create gap reports until the initial DATA chunk has been received.
             if (_inOrderReceiveCount > 0)

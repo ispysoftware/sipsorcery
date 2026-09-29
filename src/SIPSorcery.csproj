@@ -31,7 +31,6 @@
     <PackageReference Include="DnsClient" Version="1.8.0" />
     <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.6" />
     <PackageReference Include="SIPSorcery.WebSocketSharp" Version="0.0.1" />
-    <PackageReference Include="Small" Version="0.0.2" />
   </ItemGroup>
 
   <PropertyGroup>

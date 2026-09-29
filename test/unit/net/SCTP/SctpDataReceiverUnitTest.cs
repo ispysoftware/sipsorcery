@@ -589,5 +589,39 @@ namespace SIPSorcery.Net.UnitTests
             Assert.NotNull(sack);
             Assert.Empty(sack.GapAckBlocks);
         }
+
+        /// <summary>
+        /// A retransmitted DATA chunk that was already acknowledged is reported in the next SACK, once for each
+        /// extra copy, and not again in the one after.
+        /// </summary>
+        [Fact]
+        public void SackReportsDuplicatesOfAcknowledgedTSN()
+        {
+            SctpDataReceiver receiver = new SctpDataReceiver(0, 0, 50);
+            receiver.OnDataChunk(new SctpDataChunk(true, true, true, 50, 0, 0, 0, new byte[] { 0x33 }));
+            Assert.Empty(receiver.GetSackChunk().DuplicateTSN);
+
+            receiver.OnDataChunk(new SctpDataChunk(true, true, true, 50, 0, 0, 0, new byte[] { 0x33 }));
+            receiver.OnDataChunk(new SctpDataChunk(true, true, true, 50, 0, 0, 0, new byte[] { 0x33 }));
+
+            var sack = receiver.GetSackChunk();
+            Assert.Equal(2, sack.DuplicateTSN.Count);
+            Assert.All(sack.DuplicateTSN, tsn => Assert.Equal(50u, tsn));
+
+            Assert.Empty(receiver.GetSackChunk().DuplicateTSN);
+        }
+
+        /// <summary>
+        /// The action for an unrecognised chunk is the chunk type's two highest-order bits.
+        /// </summary>
+        [Theory]
+        [InlineData(0x0F, SctpUnrecognisedChunkActions.Stop)]
+        [InlineData(0x40, SctpUnrecognisedChunkActions.StopAndReport)]
+        [InlineData(0x84, SctpUnrecognisedChunkActions.Skip)]
+        [InlineData(0xC0, SctpUnrecognisedChunkActions.SkipAndReport)]
+        public void UnrecognisedChunkActionFromHighOrderBits(int chunkType, SctpUnrecognisedChunkActions expected)
+        {
+            Assert.Equal(expected, SctpChunk.GetUnrecognisedChunkAction((ushort)chunkType));
+        }
     }
 }

@@ -5,18 +5,15 @@ using Microsoft.Extensions.Logging;
 
 using SIPSorcery.Sys;
 
-using Small.Collections;
-
-using TypeNum;
-
 namespace SIPSorcery.Net;
 
 public readonly ref struct SctpPacketView
 {
     static readonly ILogger logger = LogFactory.CreateLogger<SctpPacket>();
     readonly ReadOnlySpan<byte> buffer;
-    readonly SmallList<N2<Chunk>, Chunk> chunks;
-    readonly SmallList<N0<Chunk>, Chunk> unrecognized;
+    readonly InlineList<Chunk> chunks;
+    // Only counted: the unrecognised chunks themselves are never read.
+    readonly int unrecognizedCount;
 
     public readonly SctpHeader Header => SctpHeader.Parse(buffer);
     public int ChunkCount => chunks.Count;
@@ -55,12 +52,12 @@ public readonly ref struct SctpPacketView
         }
         return false;
     }
-    public int UnrecognizedChunkCount => unrecognized.Count;
+    public int UnrecognizedChunkCount => unrecognizedCount;
 
     public static SctpPacketView Parse(ReadOnlySpan<byte> buffer)
     {
-        var chunks = new SmallList<N2<Chunk>, Chunk>();
-        var unrecognized = new SmallList<N0<Chunk>, Chunk>();
+        var chunks = new InlineList<Chunk>();
+        int unrecognizedCount = 0;
         int posn = SctpHeader.SCTP_HEADER_LENGTH;
 
         bool stop = false;
@@ -85,12 +82,12 @@ public readonly ref struct SctpPacketView
                         break;
                     case SctpUnrecognisedChunkActions.StopAndReport:
                         stop = true;
-                        unrecognized.Add(chunk);
+                        unrecognizedCount++;
                         break;
                     case SctpUnrecognisedChunkActions.Skip:
                         break;
                     case SctpUnrecognisedChunkActions.SkipAndReport:
-                        unrecognized.Add(chunk);
+                        unrecognizedCount++;
                         break;
                 }
             }
@@ -103,16 +100,16 @@ public readonly ref struct SctpPacketView
 
             posn += chunkLength;
         }
-        return new(buffer, chunks, unrecognized);
+        return new(buffer, chunks, unrecognizedCount);
     }
 
     public SctpPacket AsPacket() => SctpPacket.Parse(buffer);
 
-    SctpPacketView(ReadOnlySpan<byte> buffer, SmallList<N2<Chunk>, Chunk> chunks, SmallList<N0<Chunk>, Chunk> unrecognized)
+    SctpPacketView(ReadOnlySpan<byte> buffer, InlineList<Chunk> chunks, int unrecognizedCount)
     {
         this.buffer = buffer;
         this.chunks = chunks;
-        this.unrecognized = unrecognized;
+        this.unrecognizedCount = unrecognizedCount;
     }
 
     struct Chunk

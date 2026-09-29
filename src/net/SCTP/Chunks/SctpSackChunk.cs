@@ -19,8 +19,6 @@
 
 using System;
 using SIPSorcery.Sys;
-using Small.Collections;
-using TypeNum;
 
 namespace SIPSorcery.Net
 {
@@ -52,13 +50,13 @@ namespace SIPSorcery.Net
         /// The gap ACK blocks. Each entry represents a gap in the forward out of order
         /// TSNs received.
         /// </summary>
-        public SmallList<N8<SctpTsnGapBlock>, SctpTsnGapBlock> GapAckBlocks = new ();
+        public InlineList<SctpTsnGapBlock> GapAckBlocks;
 
         /// <summary>
         /// Indicates the number of times a TSN was received in duplicate
         /// since the last SACK was sent.
         /// </summary>
-        public SmallList<N8<uint>, uint> DuplicateTSN = new();
+        public InlineList<uint> DuplicateTSN;
 
         private SctpSackChunk() : base(SctpChunkType.SACK)
         { }
