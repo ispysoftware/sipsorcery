@@ -393,8 +393,12 @@ namespace SIPSorcery.Net
         /// If this chunk is unrecognised then this field dictates how the remainder of the 
         /// SCTP packet should be handled.
         /// </summary>
+        /// <remarks>
+        /// The action is the two highest-order bits of the 8-bit chunk type (RFC 9260 3.2). This used to shift by 14,
+        /// copied from the 16-bit parameter type version, which always gave Stop.
+        /// </remarks>
         public static SctpUnrecognisedChunkActions GetUnrecognisedChunkAction(ushort chunkType) =>
-            (SctpUnrecognisedChunkActions)(chunkType >> 14 & 0x03);
+            (SctpUnrecognisedChunkActions)((chunkType >> 6) & 0x03);
 
         /// <summary>
         /// Copies an unrecognised chunk to a byte buffer and returns it. This method is
