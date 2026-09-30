@@ -103,5 +103,19 @@ namespace SIPSorcery.Net
             if (isFinalPacket) fuHeader |= 0x40;
             return new byte[] { fuIndicator, fuHeader };
         }
+
+        /// <summary>
+        /// Allocation-free form of <see cref="GetH264RtpHeader"/>: writes the 2-byte FU-A
+        /// indicator + header into <paramref name="destination"/> and returns the length written.
+        /// </summary>
+        public static int WriteH264RtpHeader(Span<byte> destination, byte nal0, bool isFirstPacket, bool isFinalPacket)
+        {
+            byte fuHeader = (byte)(nal0 & 0x1F);
+            if (isFirstPacket) fuHeader |= 0x80;
+            if (isFinalPacket) fuHeader |= 0x40;
+            destination[0] = (byte)((nal0 & 0xE0) | 28);
+            destination[1] = fuHeader;
+            return H264_RTP_HEADER_LENGTH;
+        }
     }
 }

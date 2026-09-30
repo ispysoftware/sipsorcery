@@ -147,13 +147,15 @@ namespace SIPSorcery.Net
 
             var naluHeaderSize = is265 ? 2 : 1;
 
-            // A NAL fits into a single RTP packet.
+            // A NAL fits into a single RTP packet. Sent straight from the caller's memory: both
+            // send paths copy the payload synchronously (the pacer into its own pooled buffer,
+            // the unpaced path into the packet buffer under the send lock), so no per-packet
+            // array is needed. This is the hot path - slice-max-size keeps most NALs this small.
             if (nal.Length <= RTPSession.RTP_MAX_PAYLOAD)
             {
-                byte[] payload = nal.ToArray();
                 int markerBit = isLastNal ? 1 : 0;
 
-                await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
+                await SendRtpRawAsync(nal, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
             }
             else
             {
@@ -176,19 +178,15 @@ namespace SIPSorcery.Net
                         bool isFinalPacket = nalPayloadToFragment.IsEmpty;
                         int markerBit = (isLastNal && isFinalPacket) ? 1 : 0;
 
-                        byte[] rtpHdr = H264Packetiser.GetH264RtpHeader(naluHeader.Span[0], isFirstPacket, isFinalPacket);
-
-                        // Use a Span<T> to represent the portion of the rented buffer we will use.
-                        var payloadSpan = rentedBuffer.AsSpan(0, payloadLength + rtpHdr.Length);
-
-                        // Copy data into our rented buffer slice.
-                        rtpHdr.CopyTo(payloadSpan);
-                        currentSlice.Span.CopyTo(payloadSpan.Slice(rtpHdr.Length));
+                        // FU-A header written in place, then the fragment after it.
+                        int hdrLength = H264Packetiser.WriteH264RtpHeader(rentedBuffer, naluHeader.Span[0], isFirstPacket, isFinalPacket);
+                        currentSlice.Span.CopyTo(rentedBuffer.AsSpan(hdrLength));
 
                         isFirstPacket = false;
 
-                        // Send the slice of the rented buffer.
-                        await SendRtpRawAsync(payloadSpan.ToArray(), LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
+                        // Send the slice of the rented buffer directly - the send copies it
+                        // synchronously, so the next fragment can reuse the buffer.
+                        await SendRtpRawAsync(rentedBuffer.AsMemory(0, hdrLength + payloadLength), LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
                     }
                 }
                 finally
@@ -239,6 +237,9 @@ namespace SIPSorcery.Net
                 return;
             }
 
+            // One buffer per frame for descriptor + fragment, reused for every packet: the send
+            // copies it synchronously (see SendH26XNalAsync), so no per-packet array.
+            byte[] packetBuffer = ArrayPool<byte>.Shared.Rent(RTPSession.RTP_MAX_PAYLOAD + 1);
             try
             {
                 var remainingBuffer = buffer;
@@ -257,16 +258,14 @@ namespace SIPSorcery.Net
                     byte vp8HeaderByte = isFirstPacket ? (byte)0x10 : (byte)0x00;
                     isFirstPacket = false;
 
-                    byte[] payload = new byte[payloadLength + 1];
-                    payload[0] = vp8HeaderByte;
-                    // Get the Span from the Memory slice to perform the copy.
-                    currentSlice.Span.CopyTo(payload.AsSpan(1));
+                    packetBuffer[0] = vp8HeaderByte;
+                    currentSlice.Span.CopyTo(packetBuffer.AsSpan(1));
 
                     // Set the marker bit only for the very last packet of the frame.
                     int markerBit = remainingBuffer.IsEmpty ? 1 : 0;
 
                     // Await the non-blocking send operation.
-                    await SendRtpRawAsync(payload, LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
+                    await SendRtpRawAsync(packetBuffer.AsMemory(0, payloadLength + 1), LocalTrack.Timestamp, markerBit, payloadTypeID, true).ConfigureAwait(false);
                 }
 
                 LocalTrack.Timestamp += duration;
@@ -274,6 +273,10 @@ namespace SIPSorcery.Net
             catch (SocketException sockExcp)
             {
                 logger.LogError(sockExcp, "SocketException in SendVp8FrameAsync.");
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(packetBuffer);
             }
         }
 

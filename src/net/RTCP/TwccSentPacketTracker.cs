@@ -22,7 +22,8 @@
 * License:   BSD 3-Clause "New" or "Revised" License.
 */
 
-using System.Collections.Concurrent;
+using System;
+using System.Threading;
 
 namespace SIPSorcery.Net
 {
@@ -32,10 +33,9 @@ namespace SIPSorcery.Net
     /// which is per-stream rather than truly transport-wide).
     /// </summary>
     /// <remarks>
-    /// Memory is bounded by the 16-bit TWCC seqnum space: at most 65536 entries
-    /// once every seqnum has been seen (typically ~3.5 minutes at 300 packets/sec).
-    /// New writes overwrite the entry at the same seqnum slot, so old entries are
-    /// recycled automatically when seqnums wrap. No background cleanup needed.
+    /// One slot per 16-bit TWCC seqnum. New writes overwrite the slot at the same
+    /// seqnum, so old entries are recycled automatically when seqnums wrap. No
+    /// background cleanup needed.
     ///
     /// Lookup-time staleness checking is the CALLER'S responsibility — typically
     /// the bandwidth estimator discards entries older than the TWCC feedback
@@ -45,11 +45,14 @@ namespace SIPSorcery.Net
     /// </remarks>
     public sealed class TwccSentPacketTracker
     {
-        // ConcurrentDictionary is fine here: write volume is ~300/sec (one per
-        // outgoing RTP packet at 30fps × ~10 packets/frame), read volume is
-        // ~50-100/sec (one lookup per TWCC-acked packet). No contention concern.
-        // Memory cap is ~3 MB at full population (65K entries × ~50 bytes/entry).
-        private readonly ConcurrentDictionary<ushort, long> _sendTimes = new ConcurrentDictionary<ushort, long>();
+        // Flat array indexed by seqnum (512 KB, one allocation per stream). Replaced a
+        // ConcurrentDictionary<ushort,long> that allocated a node per seqnum until all 65536
+        // existed (~1 minute of video), then held those ~3 MB of small objects in Gen2 for the
+        // life of every peer connection - GC mark work for a lookup table - and hashed + locked
+        // on every packet. 0 marks an empty slot: Stopwatch timestamps are never 0 in practice.
+        // Volatile read/write keeps each long atomic on 32-bit ARM too.
+        private readonly long[] _sendTimes = new long[ushort.MaxValue + 1];
+        private int _count;
 
         /// <summary>
         /// Record the wire-send time for an outgoing TWCC seqnum. Call this from
@@ -59,9 +62,12 @@ namespace SIPSorcery.Net
         /// <param name="sendTimeTicks">Monotonic timestamp, typically Stopwatch.GetTimestamp().</param>
         public void RecordSend(ushort sequenceNumber, long sendTimeTicks)
         {
-            // Indexer = AddOrUpdate semantics. Faster than .AddOrUpdate(seq, t, (_, _) => t)
-            // and we don't care about the previous value if a wrap caused a collision.
-            _sendTimes[sequenceNumber] = sendTimeTicks;
+            ref long slot = ref _sendTimes[sequenceNumber];
+            if (Volatile.Read(ref slot) == 0)
+            {
+                Interlocked.Increment(ref _count);
+            }
+            Volatile.Write(ref slot, sendTimeTicks);
         }
 
         /// <summary>
@@ -72,7 +78,8 @@ namespace SIPSorcery.Net
         /// validate the timestamp isn't from a stale pre-wrap entry).</returns>
         public bool TryGetSendTime(ushort sequenceNumber, out long sendTimeTicks)
         {
-            return _sendTimes.TryGetValue(sequenceNumber, out sendTimeTicks);
+            sendTimeTicks = Volatile.Read(ref _sendTimes[sequenceNumber]);
+            return sendTimeTicks != 0;
         }
 
         /// <summary>
@@ -81,12 +88,13 @@ namespace SIPSorcery.Net
         /// </summary>
         public void Reset()
         {
-            _sendTimes.Clear();
+            Array.Clear(_sendTimes);
+            Volatile.Write(ref _count, 0);
         }
 
         /// <summary>
         /// Number of recorded entries. For diagnostics.
         /// </summary>
-        public int Count => _sendTimes.Count;
+        public int Count => Volatile.Read(ref _count);
     }
 }
