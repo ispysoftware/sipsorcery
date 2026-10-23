@@ -110,14 +110,14 @@ public class IceServerResolver
 
     private void ScheduleDnsLookup(STUNUri key, IceServer server)
     {
-        if (server.DnsLookupSentAt != DateTime.MinValue)
+        if (server.DnsLookupSentAt != 0)
         {
             return;
         }
 
         if (_iceServers.ContainsKey(key))
         {
-            _iceServers[key].DnsLookupSentAt = DateTime.Now;
+            _iceServers[key].DnsLookupSentAt = Environment.TickCount64;
         }
 
         logger.LogDebug("{caller} starting DNS lookup for ICE server {Uri}", nameof(IceServerResolver), key);

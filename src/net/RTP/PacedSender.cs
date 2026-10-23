@@ -59,6 +59,7 @@ namespace SIPSorcery.net.RTP
 
         private const int QUEUE_CAPACITY = 4096;
         private const int DRAIN_INTERVAL_MS = 5;
+        private static readonly TimeSpan PARKED_TIMER_PERIOD = TimeSpan.FromDays(1);
 
         internal readonly struct PacedPacket
         {
@@ -67,14 +68,16 @@ namespace SIPSorcery.net.RTP
             public readonly uint Timestamp;
             public readonly int MarkerBit;
             public readonly int PayloadType;
+            public readonly long Sequence;    // enqueue order, for Clear()
 
-            public PacedPacket(byte[] payload, int length, uint timestamp, int markerBit, int payloadType)
+            public PacedPacket(byte[] payload, int length, uint timestamp, int markerBit, int payloadType, long sequence)
             {
                 Payload = payload;
                 Length = length;
                 Timestamp = timestamp;
                 MarkerBit = markerBit;
                 PayloadType = payloadType;
+                Sequence = sequence;
             }
         }
 
@@ -96,7 +99,12 @@ namespace SIPSorcery.net.RTP
         private double _paceBytesPerSecond; // 0 = bypass
         private long _dropLogTicks;
         private int _droppedSinceLog;
-        private volatile bool _flushRequested;
+
+        // Clear() drops every packet enqueued up to the sequence it records. A cutoff rather
+        // than a "flush requested" flag: the drain loop parks while the queue is empty, and a
+        // flag raised then would sit until the next packets arrived and drop THOSE instead.
+        private long _enqueueSequence;
+        private long _flushThroughSequence;
 
         public PacedSender(Func<PacedPacket, Task> sendNow)
         {
@@ -152,12 +160,34 @@ namespace SIPSorcery.net.RTP
         /// Sequence numbers are assigned at send time, not enqueue time, so
         /// dropping queued packets creates no RTP sequence gap; the receiver just
         /// never completes the in-flight frame and recovers on the next keyframe.
-        /// The actual drop happens on the drain loop's next tick (≤5ms) because it
-        /// is the channel's single reader.
+        /// The drop itself happens as the drain loop (the channel's single reader)
+        /// reaches those packets; packets enqueued after this call are unaffected.
         /// </summary>
         public void Clear()
         {
-            _flushRequested = true;
+            // Only ever raise the cutoff: two concurrent calls must not let the lower one land last.
+            long target = Interlocked.Read(ref _enqueueSequence);
+            long current = Interlocked.Read(ref _flushThroughSequence);
+            while (target > current)
+            {
+                long seen = Interlocked.CompareExchange(ref _flushThroughSequence, target, current);
+                if (seen == current)
+                {
+                    break;
+                }
+                current = seen;
+            }
+        }
+
+        // True (and the packet's buffer returned) if Clear() has dropped this packet.
+        private bool DropIfFlushed(in PacedPacket pkt)
+        {
+            if (pkt.Sequence > Volatile.Read(ref _flushThroughSequence))
+            {
+                return false;
+            }
+            ArrayPool<byte>.Shared.Return(pkt.Payload);
+            return true;
         }
 
         /// <summary>
@@ -177,7 +207,8 @@ namespace SIPSorcery.net.RTP
             byte[] copy = ArrayPool<byte>.Shared.Rent(payload.Length);
             payload.CopyTo(copy);
 
-            if (_queue.Writer.TryWrite(new PacedPacket(copy, payload.Length, timestamp, markerBit, payloadType)))
+            long sequence = Interlocked.Increment(ref _enqueueSequence);
+            if (_queue.Writer.TryWrite(new PacedPacket(copy, payload.Length, timestamp, markerBit, payloadType, sequence)))
             {
                 Interlocked.Add(ref _queuedBytes, payload.Length);
                 return true;
@@ -204,24 +235,34 @@ namespace SIPSorcery.net.RTP
 
             try
             {
-                using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(DRAIN_INTERVAL_MS));
-                while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+                var drainInterval = TimeSpan.FromMilliseconds(DRAIN_INTERVAL_MS);
+                using var timer = new PeriodicTimer(drainInterval);
+                while (true)
                 {
+                    if (_queue.Reader.Count == 0)
+                    {
+                        // Park while there is nothing to send instead of ticking every 5ms per viewer,
+                        // and stop the timer meanwhile: a running PeriodicTimer keeps firing with nobody
+                        // waiting. A long finite period rather than InfiniteTimeSpan, which not every
+                        // runtime accepts here (a throw would end the drain loop and stall paced video).
+                        timer.Period = PARKED_TIMER_PERIOD;
+                        if (!await _queue.Reader.WaitToReadAsync(token).ConfigureAwait(false))
+                        {
+                            break; // writer completed (Dispose)
+                        }
+                        timer.Period = drainInterval;
+
+                        // Drain at once: the first packet after idle shouldn't wait for a tick. The
+                        // budget below is capped at MAX_BUDGET_WINDOW_SECONDS, exactly as after idle ticks.
+                    }
+                    else if (!await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+                    {
+                        break;
+                    }
+
                     long now = Stopwatch.GetTimestamp();
                     double elapsedSec = (double)(now - lastTicks) / Stopwatch.Frequency;
                     lastTicks = now;
-
-                    if (_flushRequested)
-                    {
-                        _flushRequested = false;
-                        while (_queue.Reader.TryRead(out var dropPkt))
-                        {
-                            Interlocked.Add(ref _queuedBytes, -dropPkt.Length);
-                            ArrayPool<byte>.Shared.Return(dropPkt.Payload);
-                        }
-                        budgetBytes = 0;
-                        continue;
-                    }
 
                     double rate = Volatile.Read(ref _paceBytesPerSecond);
                     if (rate <= 0)
@@ -230,7 +271,10 @@ namespace SIPSorcery.net.RTP
                         while (_queue.Reader.TryRead(out var flushPkt))
                         {
                             Interlocked.Add(ref _queuedBytes, -flushPkt.Length);
-                            await SendAndReturnAsync(flushPkt).ConfigureAwait(false);
+                            if (!DropIfFlushed(flushPkt))
+                            {
+                                await SendAndReturnAsync(flushPkt).ConfigureAwait(false);
+                            }
                         }
                         budgetBytes = 0;
                         continue;
@@ -246,6 +290,10 @@ namespace SIPSorcery.net.RTP
                     while (budgetBytes > 0 && _queue.Reader.TryRead(out var pkt))
                     {
                         Interlocked.Add(ref _queuedBytes, -pkt.Length);
+                        if (DropIfFlushed(pkt))
+                        {
+                            continue; // dropped by Clear(): costs no budget
+                        }
                         budgetBytes -= pkt.Length + PACKET_OVERHEAD_BYTES;
                         await SendAndReturnAsync(pkt).ConfigureAwait(false);
                     }

@@ -116,10 +116,13 @@ namespace SIPSorcery.Net
         /// </summary>
         internal string TransactionID { get; private set; }
 
+        // Timestamps below are Environment.TickCount64 milliseconds (0 = not set): a monotonic clock, so a
+        // daylight-saving or system clock change can't delay a TURN refresh or a DNS timeout.
+
         /// <summary>
-        /// The timestamp that the DNS lookup for this ICE server was sent at.
+        /// Environment.TickCount64 (ms) the DNS lookup for this ICE server was sent at, 0 if none.
         /// </summary>
-        internal DateTime DnsLookupSentAt { get; set; } = DateTime.MinValue;
+        internal long DnsLookupSentAt { get; set; }
 
         /// <summary>
         /// The number of requests that have been sent to the server without
@@ -128,19 +131,19 @@ namespace SIPSorcery.Net
         internal int OutstandingRequestsSent { get; set; }
 
         /// <summary>
-        /// The timestamp the most recent binding request was sent at.
+        /// Environment.TickCount64 (ms) the most recent binding request was sent at.
         /// </summary>
-        internal DateTime LastRequestSentAt { get; set; }
+        internal long LastRequestSentAt { get; set; }
 
         /// <summary>
-        /// The timestamp of the most recent response received from the ICE server.
+        /// Environment.TickCount64 (ms) of the most recent response received from the ICE server, 0 if none.
         /// </summary>
-        internal DateTime LastResponseReceivedAt { get; set; } = DateTime.MinValue;
+        internal long LastResponseReceivedAt { get; set; }
 
         /// <summary>
-        /// This field records the time when allocation expires
+        /// Environment.TickCount64 (ms) at which the TURN allocation expires, 0 if unknown.
         /// </summary>
-        public DateTime TurnTimeToExpiry { get; set; } = DateTime.MinValue;
+        public long TurnTimeToExpiry { get; set; }
 
         /// <summary>
         /// Records the failure message if there was an error configuring or contacting
@@ -292,7 +295,7 @@ namespace SIPSorcery.Net
             if (TransactionID == txID)
             {
                 // The STUN response is for a check sent to an ICE server.
-                LastResponseReceivedAt = DateTime.Now;
+                LastResponseReceivedAt = Environment.TickCount64;
                 OutstandingRequestsSent = 0;
 
                 if (stunResponse.Header.MessageType == STUNMessageTypesEnum.AllocateSuccessResponse)
@@ -323,13 +326,12 @@ namespace SIPSorcery.Net
 
                         if (lifetime != null)
                         {
-                            TurnTimeToExpiry = DateTime.Now +
-                                               TimeSpan.FromSeconds(BitConverter.ToUInt32(lifetime.Value.Reverse().ToArray(), 0));
+                            TurnTimeToExpiry = Environment.TickCount64 +
+                                               (long)BitConverter.ToUInt32(lifetime.Value.Reverse().ToArray(), 0) * 1000;
                         }
                         else
                         {
-                            TurnTimeToExpiry = DateTime.Now +
-                                               TimeSpan.FromSeconds(3600);
+                            TurnTimeToExpiry = Environment.TickCount64 + 3600L * 1000;
                         }
 
                         candidatesAvailable = true;
@@ -420,8 +422,8 @@ namespace SIPSorcery.Net
 
                     if (lifetime != null)
                     {
-                        TurnTimeToExpiry = DateTime.Now +
-                                           TimeSpan.FromSeconds(BitConverter.ToUInt32(lifetime.Value.Reverse().ToArray(), 0));
+                        TurnTimeToExpiry = Environment.TickCount64 +
+                                           (long)BitConverter.ToUInt32(lifetime.Value.Reverse().ToArray(), 0) * 1000;
                     }
 
                 }

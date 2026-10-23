@@ -76,20 +76,24 @@ namespace SIPSorcery.Net
         /// </summary>
         public uint Ssrc { get; set; }
 
-        /// <summary>
-        /// Timestamp that the RTCP session was created at.
-        /// </summary>
-        public DateTime CreatedAt { get; private set; }
+        // Session timestamps are Environment.TickCount64 milliseconds (0 = not set): a monotonic clock, so a
+        // daylight-saving or system clock change can't trip the no-activity timeout. NTP timestamps sent in
+        // reports are wall-clock by definition and use DateTime.UtcNow.
 
         /// <summary>
-        /// Timestamp that the RTCP session sender report scheduler was started at.
+        /// Environment.TickCount64 (ms) the RTCP session was created at.
         /// </summary>
-        public DateTime StartedAt { get; private set; }
+        public long CreatedAt { get; private set; }
 
         /// <summary>
-        /// Timestamp that the last RTP or RTCP packet for was received at.
+        /// Environment.TickCount64 (ms) the RTCP session sender report scheduler was started at.
         /// </summary>
-        public DateTime LastActivityAt { get; private set; } = DateTime.MinValue;
+        public long StartedAt { get; private set; }
+
+        /// <summary>
+        /// Environment.TickCount64 (ms) the last RTP or RTCP packet was received at, 0 if none yet.
+        /// </summary>
+        public long LastActivityAt { get; private set; }
 
         /// <summary>
         /// Time to wait before classifying the session as timed out due to inactivity.
@@ -126,7 +130,13 @@ namespace SIPSorcery.Net
         /// <summary>
         /// The last NTP timestamp corresponding to the last RTP timestamp sent by us.
         /// </summary>
-        public ulong LastNtpTimestampSent { get; private set; }
+        public ulong LastNtpTimestampSent =>
+            _lastRtpSendUtcTicks == 0 ? 0 : DateTimeToNtpTimestamp(new DateTime(_lastRtpSendUtcTicks, DateTimeKind.Utc));
+
+        // UTC ticks of the last RTP send. Converted to NTP only when LastNtpTimestampSent is read:
+        // RecordRtpPacketSend runs per packet and the conversion (local-time lookup + UTC
+        // conversions + float maths) was being paid for a value that is rarely, if ever, read.
+        private long _lastRtpSendUtcTicks;
 
         /// <summary>
         /// Number of RTP packets received from the remote party.
@@ -188,13 +198,28 @@ namespace SIPSorcery.Net
         {
             MediaType = mediaType;
             Ssrc = ssrc;
-            CreatedAt = DateTime.Now;
+            CreatedAt = Environment.TickCount64;
+            _createdStopwatchTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             Cname = Guid.NewGuid().ToString();
+        }
+
+        // High-resolution counterpart of CreatedAt for the jitter arrival clock. TickCount64 only advances every
+        // ~15.6 ms on Windows, which is coarser than the packet spacing the jitter estimate measures.
+        private readonly long _createdStopwatchTicks;
+
+        /// <summary>
+        /// Converts a Stopwatch tick count to <paramref name="unitsPerSecond"/> units without overflowing for large
+        /// tick counts (Stopwatch.Frequency is 1 GHz on Linux).
+        /// </summary>
+        internal static long StopwatchTicksToUnits(long ticks, long unitsPerSecond)
+        {
+            long frequency = System.Diagnostics.Stopwatch.Frequency;
+            return (ticks / frequency) * unitsPerSecond + (ticks % frequency) * unitsPerSecond / frequency;
         }
 
         public void Start()
         {
-            StartedAt = DateTime.Now;
+            StartedAt = Environment.TickCount64;
 
             // Schedule an immediate sender report.
             var interval = GetNextRtcpInterval(RTCP_MINIMUM_REPORT_PERIOD_MILLISECONDS);
@@ -221,7 +246,8 @@ namespace SIPSorcery.Net
         /// </summary>
         public void RecordRtpPacketReceived(RTPPacket rtpPacket)
         {
-            LastActivityAt = DateTime.Now;
+            long now = Environment.TickCount64;
+            LastActivityAt = now;
             IsTimedOut = false;
             PacketsReceivedCount++;
             OctetsReceivedCount += (uint)rtpPacket.Payload.Length;
@@ -231,7 +257,14 @@ namespace SIPSorcery.Net
                 m_receptionReport = new ReceptionReport(rtpPacket.Header.SyncSource);
             }
 
-            var arrivalTimestamp = PayloadSampleRateHz == 0 ? DateTimeToNtpTimestamp32(DateTime.Now) : (uint)((DateTime.Now - CreatedAt).TotalSeconds * PayloadSampleRateHz);
+            // Arrival time for the interarrival jitter estimate. Only differences between arrivals are used, so a
+            // monotonic clock is right, and a high-resolution one (Stopwatch) since packets are ~20 ms apart: in RTP
+            // clock units when the rate is known, otherwise in 1/65536 s units (the scale of the NTP-based value it
+            // replaces). Integer maths, truncated to 32 bits so it wraps like an RTP timestamp.
+            long arrivalTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            var arrivalTimestamp = PayloadSampleRateHz == 0
+                ? unchecked((uint)StopwatchTicksToUnits(arrivalTicks, 65536))
+                : unchecked((uint)StopwatchTicksToUnits(arrivalTicks - _createdStopwatchTicks, PayloadSampleRateHz));
             m_receptionReport.RtpPacketReceived(rtpPacket.Header.SequenceNumber, rtpPacket.Header.Timestamp, arrivalTimestamp);
         }
 
@@ -260,7 +293,7 @@ namespace SIPSorcery.Net
             OctetsSentCount += (uint)packetLength;
             LastSeqNum = sequenceNumber;
             LastRtpTimestampSent = rtpTimestamp;
-            LastNtpTimestampSent = DateTimeToNtpTimestamp(DateTime.Now);
+            _lastRtpSendUtcTicks = DateTime.UtcNow.Ticks;
         }
 
         /// <summary>
@@ -272,7 +305,7 @@ namespace SIPSorcery.Net
         {
             try
             {
-                LastActivityAt = DateTime.Now;
+                LastActivityAt = Environment.TickCount64;
                 IsTimedOut = false;
 
                 if (rtcpCompoundPacket != null)
@@ -319,8 +352,10 @@ namespace SIPSorcery.Net
                 {
                     lock (m_rtcpReportTimer)
                     {
-                        if ((LastActivityAt != DateTime.MinValue && DateTime.Now.Subtract(LastActivityAt) > NoActivityTimeout) ||
-                            (LastActivityAt == DateTime.MinValue && DateTime.Now.Subtract(CreatedAt) > NoActivityTimeout))
+                        long now = Environment.TickCount64;
+                        long timeoutMs = (long)NoActivityTimeout.TotalMilliseconds;
+                        if ((LastActivityAt != 0 && now - LastActivityAt > timeoutMs) ||
+                            (LastActivityAt == 0 && now - CreatedAt > timeoutMs))
                         {
                             if (!IsTimedOut)
                             {
@@ -370,7 +405,7 @@ namespace SIPSorcery.Net
         /// <returns>An RTCP compound packet.</returns>
         public RTCPCompoundPacket GetRtcpReport()
         {
-            var ntcTime = DateTimeToNtpTimestamp(DateTime.Now);
+            var ntcTime = DateTimeToNtpTimestamp(DateTime.UtcNow);
             ReceptionReportSample rr = (m_receptionReport != null) ? m_receptionReport.GetSample(To32Bit(ntcTime)) : null;
             var sdesReport = new RTCPSDesReport(Ssrc, Cname);
 
@@ -415,7 +450,8 @@ namespace SIPSorcery.Net
         /// <summary>
         /// Converts specified DateTime value to long NTP time.
         /// </summary>
-        /// <param name="value">DateTime value to convert. This value must be in local time.</param>
+        /// <param name="value">DateTime value to convert. Pass DateTime.UtcNow: a local time is converted, but is
+        /// ambiguous in the hour the clocks go back.</param>
         /// <returns>Returns NTP value.</returns>
         /// <notes>
         /// Wallclock time (absolute date and time) is represented using the

@@ -1630,13 +1630,13 @@ namespace SIPSorcery.Net
                     }
                 };
 
-                DateTime startTime = DateTime.Now;
+                long startTime = Environment.TickCount64;
 
                 var completedTask = await Task.WhenAny(onSctpConnectedTcs.Task, Task.Delay(SCTP_ASSOCIATE_TIMEOUT_SECONDS * 1000, cancel)).ConfigureAwait(false);
 
                 if (sctp.state != RTCSctpTransportState.Connected)
                 {
-                    var duration = DateTime.Now.Subtract(startTime).TotalMilliseconds;
+                    var duration = Environment.TickCount64 - startTime;
 
                     if (completedTask != onSctpConnectedTcs.Task)
                     {

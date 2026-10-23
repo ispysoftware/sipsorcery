@@ -161,15 +161,18 @@ namespace SIPSorcery.Net
             }
         }
 
-        /// <summary>
-        /// Timestamp the first connectivity check (STUN binding request) was sent at.
-        /// </summary>
-        public DateTime FirstCheckSentAt = DateTime.MinValue;
+        // ICE/TURN timestamps in this file are Environment.TickCount64 milliseconds (0 = not set): a monotonic
+        // clock, so daylight-saving and system clock changes can't fail a connection or stall a TURN refresh.
 
         /// <summary>
-        /// Timestamp the last connectivity check (STUN binding request) was sent at.
+        /// Environment.TickCount64 (ms) the first connectivity check (STUN binding request) was sent at, 0 if none.
         /// </summary>
-        public DateTime LastCheckSentAt = DateTime.MinValue;
+        public long FirstCheckSentAt;
+
+        /// <summary>
+        /// Environment.TickCount64 (ms) the last connectivity check (STUN binding request) was sent at, 0 if none.
+        /// </summary>
+        public long LastCheckSentAt;
 
         /// <summary>
         /// The number of checks that have been sent without a response.
@@ -213,22 +216,47 @@ namespace SIPSorcery.Net
         public int TurnPermissionsRequestSent { get; set; } = 0;
 
         /// <summary>
-        /// This field records the time a Create Permissions response was received.
+        /// Environment.TickCount64 (ms) a Create Permissions (or ChannelBind) response was received, 0 if none.
         /// </summary>
-        public DateTime TurnPermissionsResponseAt { get; set; } = DateTime.MinValue;
+        public long TurnPermissionsResponseAt { get; set; }
 
         /// <summary>
-        /// If a candidate has been nominated this field records the time the last
+        /// TURN channel number (0x4000-0x4FFF) for this pair's peer on its relay allocation, or 0 if none.
+        /// Assigned when the first ChannelBind is sent and kept for refreshes; relayed ChannelData from the
+        /// TURN server is accepted for it from then on, since the server may relay peer data as ChannelData
+        /// before the success response reaches us.
+        /// </summary>
+        public ushort TurnChannelNumber { get; set; }
+
+        /// <summary>
+        /// True once the TURN server confirmed the channel binding: sends to the peer then go as ChannelData
+        /// (4-byte header) instead of Send indications.
+        /// </summary>
+        public bool TurnChannelBound { get; set; }
+
+        /// <summary>
+        /// The TURN server refused the channel binding (or never answered): stay on Send indications.
+        /// </summary>
+        public bool TurnChannelBindFailed { get; set; }
+
+        /// <summary>
+        /// Number of initial ChannelBind requests sent for this entry (refreshes are counted in
+        /// <see cref="TurnPermissionsRequestSent"/>, as a binding refresh also refreshes the permission).
+        /// </summary>
+        public int TurnChannelBindRequestsSent { get; set; }
+
+        /// <summary>
+        /// If a candidate has been nominated this field records the Environment.TickCount64 (ms) the last
         /// STUN binding response was received from the remote peer.
         /// </summary>
-        public DateTime LastConnectedResponseAt { get; set; }
+        public long LastConnectedResponseAt { get; set; }
 
         public bool IsLocalController { get; private set; }
 
         /// <summary>
-        /// Timestamp for the most recent binding request received from the remote peer.
+        /// Environment.TickCount64 (ms) of the most recent binding request received from the remote peer.
         /// </summary>
-        public DateTime LastBindingRequestReceivedAt { get; set; }
+        public long LastBindingRequestReceivedAt { get; set; }
 
         /// <summary>
         /// Creates a new entry for the ICE session checklist.
@@ -309,8 +337,8 @@ namespace SIPSorcery.Net
 
                 if (lifetime != null)
                 {
-                    LocalCandidate.IceServer.TurnTimeToExpiry = DateTime.Now +
-                                                               TimeSpan.FromSeconds(BitConverter.ToUInt32(lifetime.Value.Reverse().ToArray(), 0));
+                    LocalCandidate.IceServer.TurnTimeToExpiry = Environment.TickCount64 +
+                                                               (long)BitConverter.ToUInt32(lifetime.Value.Reverse().ToArray(), 0) * 1000;
                 }
             }
             else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.RefreshErrorResponse)
@@ -323,14 +351,14 @@ namespace SIPSorcery.Net
                 {
                     // If the candidate has been nominated then this is a response to a periodic
                     // check to whether the connection is still available.
-                    LastConnectedResponseAt = DateTime.Now;
+                    LastConnectedResponseAt = Environment.TickCount64;
                     RequestTransactionID = Crypto.GetRandomString(STUNHeader.TRANSACTION_ID_LENGTH);
                 }
                 else
                 {
                     State = ChecklistEntryState.Succeeded;
                     ChecksSent = 0;
-                    //LastCheckSentAt = DateTime.MinValue;
+                    //LastCheckSentAt = 0;
                 }
             }
             else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.BindingErrorResponse)
@@ -343,14 +371,14 @@ namespace SIPSorcery.Net
             {
                 logger.LogDebug("A TURN Create Permission success response was received from {RemoteEndPoint} (TxID: {TransactionId}).", remoteEndPoint, Encoding.ASCII.GetString(stunResponse.Header.TransactionId));
                 TurnPermissionsRequestSent = 1;
-                TurnPermissionsResponseAt = DateTime.Now;
+                TurnPermissionsResponseAt = Environment.TickCount64;
 
                 //After creating permission we need to return InProgressState to Waiting to send request again
                 if (State == ChecklistEntryState.InProgress)
                 {
                     State = ChecklistEntryState.Waiting;
                     //Clear CheckSentAt Time to force send it again
-                    FirstCheckSentAt = DateTime.MinValue;
+                    FirstCheckSentAt = 0;
                 }
             }
             else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.CreatePermissionErrorResponse)
@@ -370,8 +398,45 @@ namespace SIPSorcery.Net
                     var errCodeAttribute = stunResponse.Attributes.FirstOrDefault(x => x.AttributeType == STUNAttributeTypesEnum.ErrorCode) as STUNErrorCodeAttribute;
                     logger.LogWarning("ICE RTP channel TURN Create Permission error response {ErrorCode} {ReasonPhrase} was received from {RemoteEndPoint} for peer {Peer}.",
                         errCodeAttribute?.ErrorCode, errCodeAttribute?.ReasonPhrase, remoteEndPoint, RemoteCandidate?.DestinationEndPoint);
-                    TurnPermissionsResponseAt = DateTime.Now;
+                    TurnPermissionsResponseAt = Environment.TickCount64;
                     State = ChecklistEntryState.Failed;
+                }
+            }
+            else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.ChannelBindSuccessResponse)
+            {
+                if (TurnChannelBindFailed)
+                {
+                    // A late answer after we gave up: the channel is no longer refreshed (refreshes went back to
+                    // CreatePermission), so using it would stop outbound media when the binding expires.
+                    logger.LogDebug("Ignoring a late TURN ChannelBind success from {RemoteEndPoint}; staying on Send indications.", remoteEndPoint);
+                    return;
+                }
+
+                if (!TurnChannelBound)
+                {
+                    logger.LogDebug("TURN channel 0x{Channel:X4} bound via {RemoteEndPoint} for peer {Peer}; relayed sends now use ChannelData.", TurnChannelNumber, remoteEndPoint, RemoteCandidate?.DestinationEndPoint);
+                }
+                TurnChannelBound = true;
+
+                // A channel binding installs or refreshes the permission for its peer too (RFC 8656 12).
+                TurnPermissionsRequestSent = 1;
+                TurnPermissionsResponseAt = Environment.TickCount64;
+            }
+            else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.ChannelBindErrorResponse)
+            {
+                if (retry)
+                {
+                    // 401 / 438: the authentication fields were refreshed above; the next TURN refresh tick re-sends.
+                    logger.LogDebug("ICE RTP channel re-sending TURN ChannelBind after an authentication challenge from {RemoteEndPoint}.", remoteEndPoint);
+                }
+                else
+                {
+                    // Not fatal for the pair: relaying carries on with Send indications (and CreatePermission refreshes).
+                    var errCodeAttribute = stunResponse.Attributes.FirstOrDefault(x => x.AttributeType == STUNAttributeTypesEnum.ErrorCode) as STUNErrorCodeAttribute;
+                    logger.LogWarning("ICE RTP channel TURN ChannelBind error response {ErrorCode} {ReasonPhrase} from {RemoteEndPoint}; staying on Send indications.",
+                        errCodeAttribute?.ErrorCode, errCodeAttribute?.ReasonPhrase, remoteEndPoint);
+                    TurnChannelBound = false;
+                    TurnChannelBindFailed = true;
                 }
             }
             else

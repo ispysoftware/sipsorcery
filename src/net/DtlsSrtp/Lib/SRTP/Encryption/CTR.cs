@@ -110,9 +110,11 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP.Encryption
                 if (payloadSize % BLOCK_SIZE != 0)
                 {
                     BinaryPrimitives.WriteUInt16BigEndian(iv.Slice(14, 2), (ushort)blockNo);
-                    var lastBlock = GC.AllocateUninitializedArray<byte>(BLOCK_SIZE);
+                    // Stack, not heap: nearly every RTP payload ends in a partial block, so this
+                    // was an allocation per protected packet.
+                    Span<byte> lastBlock = stackalloc byte[BLOCK_SIZE];
                     engine.ProcessBlock(iv, lastBlock);
-                    Buffer.BlockCopy(lastBlock, 0, cipher, BLOCK_SIZE * blockNo, payloadSize % BLOCK_SIZE);
+                    lastBlock.Slice(0, payloadSize % BLOCK_SIZE).CopyTo(cipher.AsSpan(BLOCK_SIZE * blockNo));
                 }
 
                 BinaryExtensions.Xor(

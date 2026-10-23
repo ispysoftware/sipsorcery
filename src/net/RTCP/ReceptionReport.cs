@@ -222,7 +222,7 @@ namespace SIPSorcery.Net
                 new ReceivedSRTimestamp
                 {
                     NTP = (uint)((srNtpTimestamp >> 16) & 0xFFFFFFFF),
-                    ReceivedAt = DateTime.Now
+                    ReceivedAt = System.Diagnostics.Stopwatch.GetTimestamp()
                 });
         }
 
@@ -306,6 +306,8 @@ namespace SIPSorcery.Net
         /// <summary>
         /// Gets a point in time sample for the reception report.
         /// </summary>
+        /// <param name="ntpTimestampNow">Unused: the delay since the last sender report is measured on a
+        /// monotonic clock. Kept for API compatibility.</param>
         /// <returns>A reception report sample.</returns>
         public ReceptionReportSample GetSample(uint ntpTimestampNow)
         {
@@ -325,8 +327,11 @@ namespace SIPSorcery.Net
             uint jitter = m_jitter >> 4;
 
             var receivedLSRTimestamp = m_receivedLSRTimestamp;
-            uint delay = receivedLSRTimestamp == null || receivedLSRTimestamp.ReceivedAt == DateTime.MinValue ?
-                0 : ntpTimestampNow - RTCPSession.DateTimeToNtpTimestamp32(receivedLSRTimestamp.ReceivedAt);
+            // DLSR: delay since the last sender report, in 1/65536 s units (RFC 3550 6.4.1). Stopwatch, not
+            // TickCount64: the peer derives round-trip time from this, and TickCount64 only advances every ~15.6 ms
+            // on Windows.
+            uint delay = receivedLSRTimestamp == null || receivedLSRTimestamp.ReceivedAt == 0 ?
+                0 : unchecked((uint)RTCPSession.StopwatchTicksToUnits(System.Diagnostics.Stopwatch.GetTimestamp() - receivedLSRTimestamp.ReceivedAt, 65536));
 
             return new ReceptionReportSample(SSRC, fraction, (int)lost_interval, m_max_seq, jitter, receivedLSRTimestamp?.NTP ?? 0, delay);
         }
@@ -438,8 +443,8 @@ namespace SIPSorcery.Net
         public uint NTP = 0;
 
         /// <summary>
-        /// Datetime the sender report was received at.
+        /// Stopwatch.GetTimestamp() the sender report was received at, 0 if none.
         /// </summary>
-        public DateTime ReceivedAt = DateTime.MinValue;
+        public long ReceivedAt;
     }
 }

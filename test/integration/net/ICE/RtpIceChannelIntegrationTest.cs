@@ -239,7 +239,7 @@ namespace SIPSorcery.Net.IntegrationTests
 
             await Task.Delay(1000);
 
-            rtpIceChannel._checklist.Single().FirstCheckSentAt = DateTime.Now.Subtract(TimeSpan.FromSeconds(RtpIceChannel.FAILED_TIMEOUT_PERIOD));
+            rtpIceChannel._checklist.Single().FirstCheckSentAt = Environment.TickCount64 - RtpIceChannel.FAILED_TIMEOUT_PERIOD * 1000L;
 
             await Task.Delay(1000);
 

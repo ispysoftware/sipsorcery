@@ -2450,7 +2450,7 @@ namespace SIPSorcery.Net
             {
                 if (mediaStream?.RtcpSession != null)
                 {
-                    if (mediaStream.RtcpSession.LastActivityAt == DateTime.MinValue)
+                    if (mediaStream.RtcpSession.LastActivityAt == 0)
                     {
                         if ((mediaStream.ControlDestinationEndPoint == null ||
                              !mediaStream.ControlDestinationEndPoint.Address.Equals(remoteEndPoint.Address) ||

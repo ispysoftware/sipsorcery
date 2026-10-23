@@ -46,6 +46,11 @@ namespace SIPSorcery.Net
         public uint Tag { get; set; }
         public uint TSN { get; set; }
         public uint ARwnd { get; set; }
+
+        /// <summary>
+        /// Environment.TickCount64 (ms) the cookie was created at, as an invariant-culture string. A monotonic
+        /// clock is enough: only this process issues and checks its cookies (they are HMAC'd with its own key).
+        /// </summary>
         public string CreatedAt { get; set; }
         public int Lifetime { get; set; }
         public string HMAC { get; set; }
@@ -155,6 +160,13 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
+        /// The value for <see cref="SctpTransportCookie.CreatedAt"/>: Environment.TickCount64 (ms) as an
+        /// invariant-culture string, checked against the cookie lifetime in <see cref="GetCookie"/>.
+        /// </summary>
+        protected static string GetCookieTimestamp() =>
+            Environment.TickCount64.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        /// <summary>
         /// Gets a cookie to send in an INIT ACK chunk. This method
         /// is overloadable so that different transports can tailor how the cookie
         /// is created. For example the WebRTC SCTP transport only ever uses a
@@ -181,7 +193,7 @@ namespace SIPSorcery.Net
                 Tag = Crypto.GetRandomUInt(),
                 TSN = Crypto.GetRandomUInt(),
                 ARwnd = SctpAssociation.DEFAULT_ADVERTISED_RECEIVE_WINDOW,
-                CreatedAt = DateTime.Now.ToString("o"),
+                CreatedAt = GetCookieTimestamp(),
                 Lifetime = DEFAULT_COOKIE_LIFETIME_SECONDS + lifeTimeExtension,
                 HMAC = string.Empty
             };
@@ -271,16 +283,19 @@ namespace SIPSorcery.Net
                   new SctpCauseOnlyError(SctpErrorCauseCode.InvalidMandatoryParameter));
                 return SctpTransportCookie.Empty;
             }
-            else if (DateTime.Now.Subtract(DateTime.Parse(cookie.CreatedAt)).TotalSeconds > cookie.Lifetime)
+            else if (!long.TryParse(cookie.CreatedAt, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out long createdAt) ||
+                Environment.TickCount64 - createdAt > cookie.Lifetime * 1000L)
             {
-                logger.LogWarning($"SCTP COOKIE ECHO chunk was stale, created at {cookie.CreatedAt}, now {DateTime.Now.ToString("o")}, lifetime {cookie.Lifetime}s.");
-                var diff = DateTime.Now.Subtract(DateTime.Parse(cookie.CreatedAt).AddSeconds(cookie.Lifetime));
+                long now = Environment.TickCount64;
+                logger.LogWarning($"SCTP COOKIE ECHO chunk was stale, created at {cookie.CreatedAt}, now {now}, lifetime {cookie.Lifetime}s.");
+                // Microseconds past the lifetime (RFC 9260 3.3.10.3). An unparseable timestamp (not one we wrote) counts as stale by zero.
+                long staleMs = createdAt == 0 ? 0 : Math.Max(0, now - (createdAt + cookie.Lifetime * 1000L));
                 SendError(
                   true,
                   sctpPacket.Header.DestinationPort,
                   sctpPacket.Header.SourcePort,
                   0,
-                  new SctpErrorStaleCookieError { MeasureOfStaleness = (uint)(diff.TotalMilliseconds * 1000) });
+                  new SctpErrorStaleCookieError { MeasureOfStaleness = (uint)Math.Min(uint.MaxValue, staleMs * 1000) });
                 return SctpTransportCookie.Empty;
             }
             else
