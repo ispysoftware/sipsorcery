@@ -58,6 +58,7 @@ namespace SIPSorcery.Media
 
         private IOpusDecoder _opusDecoder;
         private IOpusEncoder _opusEncoder;
+        private int _opusEncoderRate;
 
         private List<AudioFormat> _linearFormats = new List<AudioFormat>
         {
@@ -191,14 +192,21 @@ namespace SIPSorcery.Media
             }
             else if (format.Codec == AudioCodecsEnum.OPUS)
             {
-                if (_opusEncoder == null)
+                // The PCM rate is the format's ClockRate: Opus encodes 8/12/16/24/48 kHz natively,
+                // so a caller with narrower input sets ClockRate to it rather than resampling to
+                // 48k (the RTP clock stays 48k regardless - RFC 7587). Anything else is taken as 48k.
+                var inputRate = format.ClockRate;
+                if (inputRate != 8000 && inputRate != 12000 && inputRate != 16000 && inputRate != 24000)
+                    inputRate = OPUS_SAMPLE_RATE;
+                var channelCount = format.ChannelCount > 0 ? format.ChannelCount : OPUS_CHANNELS;
+                if (_opusEncoder == null || _opusEncoderRate != inputRate || _opusEncoder.NumChannels != channelCount)
                 {
-                    var channelCount = format.ChannelCount > 0 ? format.ChannelCount : OPUS_CHANNELS;
-                    // Ensure your Opus encoder is initialized for the resampled rate (48kHz)
-                    _opusEncoder = OpusCodecFactory.CreateEncoder(8000, channelCount, OpusApplication.OPUS_APPLICATION_VOIP);
+                    (_opusEncoder as IDisposable)?.Dispose();
+                    _opusEncoder = null; // a throwing CreateEncoder must not leave the disposed one in place
+                    _opusEncoder = OpusCodecFactory.CreateEncoder(inputRate, channelCount, OpusApplication.OPUS_APPLICATION_VOIP);
                     _opusEncoder.Complexity = 5;
                     _opusEncoder.UseInbandFEC = true;
-
+                    _opusEncoderRate = inputRate;
                 }
 
                 int samplesPerChannel = pcm.Length / _opusEncoder.NumChannels;
