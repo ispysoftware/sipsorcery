@@ -1771,13 +1771,15 @@ namespace SIPSorcery.Net
                 SendDtlsPacketAsync(rtpChannel, PrimaryStream.DestinationEndPoint, buf);
             };
 
-            // Run the blocking DoHandshake method on a background thread.
-            var (handshakeResult, handshakeError) = await Task.Run(() =>
+            // DoHandshake blocks its thread until the handshake completes or times out (20 s by default), so it
+            // gets a dedicated thread: on a thread pool worker a few stalled handshakes starve the pool and delay
+            // every timer and socket completion in the process (upstream GHSA-mc26-5x96-8x52).
+            var (handshakeResult, handshakeError) = await Task.Factory.StartNew(() =>
             {
                 string error = null;
                 bool result = dtlsHandle.DoHandshake(out error);
                 return (Success: result, Error: error);
-            }).ConfigureAwait(false);
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).ConfigureAwait(false);
 
 
             if (!handshakeResult)
