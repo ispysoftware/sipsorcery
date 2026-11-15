@@ -75,6 +75,23 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
+        /// Moves the send timestamp forward without sending anything. For a sender that stops
+        /// for a while (a paused stream) and then carries on: the next packet's timestamp then
+        /// says how long the quiet spell was, the way silence suppression looks on the wire
+        /// (RFC 3551 4.1), instead of following the last packet as if no time had passed.
+        /// Call it from the same place that sends the audio, between sends.
+        /// </summary>
+        /// <param name="rtpUnits">How far to move the timestamp, in RTP timestamp units.</param>
+        public void AdvanceSendTimestamp(uint rtpUnits)
+        {
+            var track = LocalTrack;
+            if (track != null)
+            {
+                track.Timestamp = unchecked(track.Timestamp + rtpUnits);
+            }
+        }
+
+        /// <summary>
         /// Sends an audio sample to the remote peer.
         /// </summary>
         /// <param name="durationRtpUnits">The duration in RTP timestamp units of the audio sample. This
