@@ -33,7 +33,13 @@ namespace SIPSorcery.Net
     {
         public const ushort DEFAULT_SCTP_MTU = 1300;
 
-        public const uint CONGESTION_WINDOW_FACTOR = 4380;
+        /// <summary>
+        /// The initial congestion window, in MTUs. RFC 9260 7.2.1 gives min(4 * MTU, max(2 * MTU, 4404)),
+        /// about 3 packets, which made the first data channel responses on a long round trip (a TURN relay
+        /// far from both peers, ~0.75s) arrive at ~16KB per round trip: a 77KB object list took 5 round
+        /// trips. 10 MTUs is TCP's initial window (RFC 6928) and what browsers' SCTP starts with.
+        /// </summary>
+        public const int INITIAL_CONGESTION_WINDOW_MTUS = 10;
 
         /// <summary>
         /// Used to limit the number of packets that are sent at any one time, i.e. when 
@@ -49,9 +55,14 @@ namespace SIPSorcery.Net
         public const int BURST_PERIOD_MILLISECONDS = 5;
 
         /// <summary>
-        /// Retransmission timeout initial value.
+        /// Retransmission timeout initial value, used until the first round trip time measurement
+        /// (RFC 4960 15: 3 seconds). It was 200ms, which is no more than a browser's delayed SACK and far
+        /// below the round trip of a relayed connection (~770ms via a distant TURN server): everything
+        /// sent before the first measurement was retransmitted before its SACK could arrive. Retransmitted
+        /// chunks give no measurement, and each timeout cut the congestion window back to its floor, so a
+        /// 78KB response took 4 to 7 round trips instead of 2 or 3.
         /// </summary>
-        public const int RTO_INITIAL_MILLISECONDS = 200;
+        public const int RTO_INITIAL_MILLISECONDS = 3000;
 
         /// <summary>
         /// The minimum value for the Retransmission timeout.
@@ -84,7 +95,16 @@ namespace SIPSorcery.Net
         private Once _closed;
         private Once _resourcesReleased;
         private Thread _sendThread;
-        private int _lastAckedDataChunkSize;
+        /// <summary>
+        /// The user data bytes the SACK being processed has acknowledged (removed from the unconfirmed
+        /// chunks). Only ever accessed inside <see cref="GotSack(SctpChunkView)"/>.
+        /// </summary>
+        private uint _bytesAckedBySack;
+        /// <summary>
+        /// RFC 9260 7.2.2 partial_bytes_acked: the bytes acknowledged in congestion avoidance since the
+        /// congestion window was last increased.
+        /// </summary>
+        private uint _partialBytesAcked;
         private OnOff _inRetransmitMode;
         private OnOff _inFastRecoveryMode;
         /// <summary>Only ever accessed inside <see cref="GotSack(SctpChunkView)"/></summary>
@@ -199,8 +219,8 @@ namespace SIPSorcery.Net
             tsn = unchecked((int)initialTSN);
             _sendQueue = new BlockingCollection<SctpDataChunk>();
 
-            // RFC4960 7.2.1 (point 1)
-            _congestionWindow = (uint)(Math.Min(4 * _defaultMTU, Math.Max(2 * _defaultMTU, CONGESTION_WINDOW_FACTOR)));
+            // Larger than RFC4960 7.2.1 (point 1) allows, see INITIAL_CONGESTION_WINDOW_MTUS.
+            _congestionWindow = (uint)(INITIAL_CONGESTION_WINDOW_MTUS * _defaultMTU);
 
             // RFC4960 7.2.1 (point 3)
             _receiverWindow = _slowStartThreshold = remoteARwnd;
@@ -222,6 +242,8 @@ namespace SIPSorcery.Net
                 logger.LogDebug("SCTP sender exiting retransmit mode.");
             }
 
+            _bytesAckedBySack = 0;
+
             unchecked
             {
                 uint maxTSNDistance = SctpDataReceiver.GetDistance(_cumulativeAckTSN, TSN);
@@ -235,8 +257,6 @@ namespace SIPSorcery.Net
                     {
                         UpdateRoundTripTime(result);
                     }
-
-                    Interlocked.Exchange(ref _lastAckedDataChunkSize, result.UserDataLength);
                 }
 
                 if (!_gotFirstSACK)
@@ -313,7 +333,16 @@ namespace SIPSorcery.Net
 
             var outstandingBytes = _outstandingBytes;
             _receiverWindow = CalculateReceiverWindow(sack.ARwnd, outstandingBytes: (uint)outstandingBytes);
-            _congestionWindow = CalculateCongestionWindow(InterlockedEx.Read(ref _lastAckedDataChunkSize), outstandingBytes: (uint)outstandingBytes);
+            // The congestion window only grows if it was fully used when the SACK arrived, i.e. counting the
+            // bytes this SACK has just acknowledged. This used to pass the bytes left outstanding afterwards,
+            // so only the first SACK for each flight grew the window: one MTU per round trip in slow start.
+            _congestionWindow = CalculateCongestionWindow(_bytesAckedBySack, outstandingBeforeSack: (uint)outstandingBytes + _bytesAckedBySack);
+
+            if (outstandingBytes == 0)
+            {
+                // RFC 9260 7.2.2: when all of the data sent has been acknowledged.
+                _partialBytesAcked = 0;
+            }
 
             // SACK's will normally allow more data to be sent.
             _senderMre.Set();
@@ -619,6 +648,7 @@ namespace SIPSorcery.Net
                                         // RFC4960 7.2.3
                                         _slowStartThreshold = (uint)Math.Max(_congestionWindow / 2, 4 * _defaultMTU);
                                         _congestionWindow = _slowStartThreshold;
+                                        _partialBytesAcked = 0;
                                     }
                                 }
                             }
@@ -667,6 +697,7 @@ namespace SIPSorcery.Net
         {
             if (_unconfirmedChunks.TryRemove(tsn, out var chunk))
             {
+                _bytesAckedBySack += (uint)chunk.UserDataLength;
                 //chunk.Dispose();
                 _chunkPool.Return(chunk);
             }
@@ -765,6 +796,7 @@ namespace SIPSorcery.Net
                             // did not clarify, but I believe entering retransmit mode is NOT the same
                             // as T3-rtx timer expiring. Will just use regular halving formula here.
                             _congestionWindow = _slowStartThreshold;
+                            _partialBytesAcked = 0;
 
                             // For the destination address for which the timer expires, set RTO <- RTO * 2("back off the timer")
                             // RFC4960 6.3.3 E2
@@ -892,20 +924,27 @@ namespace SIPSorcery.Net
         /// <summary>
         /// Calculates an updated value for the congestion window.
         /// </summary>
-        /// <param name="lastAckDataChunkSize">The size of last ACK'ed DATA chunk.</param>
+        /// <param name="ackedBytes">The user data bytes the SACK acknowledged.</param>
+        /// <param name="outstandingBeforeSack">The bytes that were in flight when the SACK arrived.</param>
         /// <returns>A congestion window value.</returns>
-        private uint CalculateCongestionWindow(int lastAckDataChunkSize, uint outstandingBytes)
+        private uint CalculateCongestionWindow(uint ackedBytes, uint outstandingBeforeSack)
         {
+            if (ackedBytes == 0)
+            {
+                // The window only grows when the SACK acknowledges new data.
+                return _congestionWindow;
+            }
+
             if (_congestionWindow <= _slowStartThreshold)
             {
                 // In Slow-Start mode, see RFC4960 7.2.1.
                 // Updated to RFC9260 7.2.1
-                if (_congestionWindow <= outstandingBytes && !_inFastRecoveryMode.IsOn())
+                if (_congestionWindow <= outstandingBeforeSack && !_inFastRecoveryMode.IsOn())
                 {
                     // When cwnd is less than or equal to ssthresh, an SCTP endpoint MUST
                     // use the slow - start algorithm to increase cwnd only if the current
                     // congestion window is being fully utilized.
-                    uint increasedCwnd = (uint)(_congestionWindow + Math.Min(lastAckDataChunkSize, _defaultMTU));
+                    uint increasedCwnd = _congestionWindow + Math.Min(ackedBytes, _defaultMTU);
 
                     logger.LogTrace("SCTP sender congestion window in slow-start increased from {Original} to {Increased}.",
                         _congestionWindow, increasedCwnd);
@@ -919,10 +958,14 @@ namespace SIPSorcery.Net
             }
             else
             {
-                // In Congestion Avoidance mode, see RFC4960 7.2.2.
+                // In Congestion Avoidance mode, see RFC4960 7.2.2: one MTU for each congestion window's
+                // worth of acknowledged data, i.e. about once a round trip, not once a SACK.
+                _partialBytesAcked += ackedBytes;
 
-                if (_congestionWindow <= outstandingBytes)
+                if (_partialBytesAcked >= _congestionWindow && _congestionWindow <= outstandingBeforeSack)
                 {
+                    _partialBytesAcked -= _congestionWindow;
+
                     logger.LogTrace("SCTP sender congestion window in congestion avoidance increased from {Original} to {Increased}.",
                         _congestionWindow, _congestionWindow + _defaultMTU);
 

@@ -76,14 +76,15 @@ namespace SIPSorcery.Net.UnitTests
             SctpDataSender sender = new SctpDataSender("dummy", blackholeSender, mtu, 0, arwnd);
             sender.StartSending();
 
-            Assert.Equal(SctpDataSender.CONGESTION_WINDOW_FACTOR, sender._congestionWindow);
+            Assert.Equal((uint)(SctpDataSender.INITIAL_CONGESTION_WINDOW_MTUS * mtu), sender._congestionWindow);
 
             var buffer = new byte[mtu];
-            
-            sender.SendData(0, 0, buffer);
-            sender.SendData(0, 0, buffer);
-            sender.SendData(0, 0, buffer);
-            sender.SendData(0, 0, buffer);
+
+            // One more MTU sized chunk than the initial congestion window holds.
+            for (int i = 0; i <= SctpDataSender.INITIAL_CONGESTION_WINDOW_MTUS; i++)
+            {
+                sender.SendData(0, 0, buffer);
+            }
 
             await Task.Delay(100);
 
@@ -116,7 +117,7 @@ namespace SIPSorcery.Net.UnitTests
             sender._sendDataChunk = reluctantSender;
             sender.StartSending();
 
-            Assert.Equal(SctpDataSender.CONGESTION_WINDOW_FACTOR, sender._congestionWindow);
+            Assert.Equal((uint)(SctpDataSender.INITIAL_CONGESTION_WINDOW_MTUS * mtu), sender._congestionWindow);
 
             var buffer = new byte[mtu];
 
@@ -127,7 +128,7 @@ namespace SIPSorcery.Net.UnitTests
 
             await Task.Delay(100);
 
-            Assert.Equal(SctpDataSender.CONGESTION_WINDOW_FACTOR + mtu, sender._congestionWindow);
+            Assert.Equal((uint)(SctpDataSender.INITIAL_CONGESTION_WINDOW_MTUS * mtu + mtu), sender._congestionWindow);
         }
     }
 }
