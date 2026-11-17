@@ -33,7 +33,7 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.15" />
     <PackageReference Include="SIPSorcery.WebSocketSharp" Version="0.0.1" />
   </ItemGroup>
 
