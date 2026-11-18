@@ -125,6 +125,19 @@ namespace SIPSorcery.Net
         private Dictionary<uint, SctpDataChunk> _fragmentedChunks = new Dictionary<uint, SctpDataChunk>();
 
         /// <summary>
+        /// The user data bytes held in <see cref="_fragmentedChunks"/>.
+        /// </summary>
+        private int _fragmentedBytes;
+
+        /// <summary>
+        /// The most fragment data held waiting for the rest of its message. Fragments of a message
+        /// have consecutive TSNs, so in practice one message is being reassembled at a time and no
+        /// deliverable message is larger than <see cref="MAX_FRAME_SIZE"/>. Without a limit a peer
+        /// sending fragments of a message it never finishes grew this store for as long as it liked.
+        /// </summary>
+        private const int MAX_FRAGMENTED_BYTES = 2 * MAX_FRAME_SIZE;
+
+        /// <summary>
         /// Keeps track of the latest sequence number for each stream. Used to ensure
         /// stream chunks are delivered in order.
         /// </summary>
@@ -264,6 +277,16 @@ namespace SIPSorcery.Net
 
                 bool processFrame = true;
 
+                if (!(dataChunk.Beginning && dataChunk.Ending) &&
+                    _fragmentedBytes + dataChunk.UserData.Length > MAX_FRAGMENTED_BYTES)
+                {
+                    // Not recorded as received, so it is not acknowledged either: a peer that means it
+                    // will retransmit, and by then the message in the way has completed or been dropped.
+                    logger.LogWarning("SCTP data receiver fragment store is full ({Bytes} bytes). Rejected fragment TSN {TSN} on stream {StreamID}.",
+                        _fragmentedBytes, dataChunk.TSN, dataChunk.StreamID);
+                    return sortedFrames;
+                }
+
                 // Relying on unsigned integer wrapping.
                 unchecked
                 {
@@ -322,6 +345,7 @@ namespace SIPSorcery.Net
                         var tmp = SctpDataChunk.ParseChunk(dataChunk.Buffer, 0, ArrayPool<byte>.Shared);
                         // This is a data chunk fragment.
                         _fragmentedChunks.Add(dataChunk.TSN, tmp);
+                        _fragmentedBytes += tmp.UserData.Length;
                         (var begin, var end) = GetChunkBeginAndEnd(_fragmentedChunks, dataChunk.TSN);
 
                         if (begin != null && end != null)
@@ -458,13 +482,15 @@ namespace SIPSorcery.Net
                 // This is a stream chunk. Need to ensure in order delivery.
                 var sortedFrames = new List<SctpDataFrame>();
 
-                if (!_streamLatestSeqNums.ContainsKey(frame.StreamID))
-                {
-                    // First frame for this stream.
-                    _streamLatestSeqNums.Add(frame.StreamID, frame.StreamSeqNum);
-                    sortedFrames.Add(frame);
-                }
-                else if ((ushort)(_streamLatestSeqNums[frame.StreamID] + 1) == frame.StreamSeqNum)
+                // A stream's sequence numbers start at 0 (RFC4960 6.5), so that is what is expected until
+                // a frame has been delivered. Taking the first frame to arrive as the start instead lost
+                // the real first message for good whenever it was overtaken: with the data channel OPEN
+                // (seqnum 0) dropped and the browser's first message (seqnum 1) arriving ahead of the
+                // retransmission, the OPEN was parked as out of order and the channel never opened.
+                bool hasLatest = _streamLatestSeqNums.TryGetValue(frame.StreamID, out ushort latestSeqNum);
+                ushort expectedSeqNum = hasLatest ? (ushort)(latestSeqNum + 1) : (ushort)0;
+
+                if (expectedSeqNum == frame.StreamSeqNum)
                 {
                     // Expected seqnum for stream.
                     _streamLatestSeqNums[frame.StreamID] = frame.StreamSeqNum;
@@ -560,28 +586,71 @@ namespace SIPSorcery.Net
         {
             unchecked
             {
-                Span<byte> full = stackalloc byte[MAX_FRAME_SIZE];
-                int posn = 0;
                 var beginChunk = fragments[beginTSN];
+                bool unordered = beginChunk.Unordered;
+                ushort streamID = beginChunk.StreamID;
+                ushort streamSeqNum = beginChunk.StreamSeqNum;
+                uint ppid = beginChunk.PPID;
 
                 uint afterEndTSN = endTSN + 1;
-                uint tsn = beginTSN;
 
-                while (tsn != afterEndTSN)
+                // The message is put together in a pooled buffer of its own size. It was a 256KB
+                // stackalloc, zeroed for every fragmented message however small, on a thread that
+                // already had 256KB of stack taken; and a message over 256KB threw part of the way
+                // through the copy, with the fragments removed so far gone and the rest left behind
+                // for good.
+                int total = 0;
+                for (uint tsn = beginTSN; tsn != afterEndTSN; tsn++)
                 {
-                    var fragment = fragments[tsn];
-                    var fragmentData = fragment.UserData;
-                    fragmentData.CopyTo(full.Slice(posn));
-                    posn += fragmentData.Length;
-                    fragments.Remove(tsn);
-                    fragment.Dispose();
-                    tsn++;
+                    total += fragments[tsn].UserData.Length;
                 }
 
-                var frame = new SctpDataFrame(beginChunk.Unordered, beginChunk.StreamID, beginChunk.StreamSeqNum, beginChunk.PPID);
-                frame.SetUserData(full.Slice(0, posn));
+                if (total > MAX_FRAME_SIZE)
+                {
+                    logger.LogWarning("SCTP data receiver dropped a fragmented message of {Length} bytes on stream {StreamID}, the maximum is {Maximum}.",
+                        total, streamID, MAX_FRAME_SIZE);
 
-                return frame;
+                    for (uint tsn = beginTSN; tsn != afterEndTSN; tsn++)
+                    {
+                        RemoveFragment(fragments, tsn);
+                    }
+
+                    return SctpDataFrame.Empty;
+                }
+
+                byte[] full = ArrayPool<byte>.Shared.Rent(total);
+                try
+                {
+                    int posn = 0;
+                    for (uint tsn = beginTSN; tsn != afterEndTSN; tsn++)
+                    {
+                        var fragmentData = fragments[tsn].UserData;
+                        fragmentData.CopyTo(full.AsSpan(posn));
+                        posn += fragmentData.Length;
+                        RemoveFragment(fragments, tsn);
+                    }
+
+                    var frame = new SctpDataFrame(unordered, streamID, streamSeqNum, ppid);
+                    frame.SetUserData(full.AsSpan(0, posn));
+
+                    return frame;
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(full);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Removes a fragment from the store and releases its buffer.
+        /// </summary>
+        private void RemoveFragment(Dictionary<uint, SctpDataChunk> fragments, uint tsn)
+        {
+            if (fragments.Remove(tsn, out var fragment))
+            {
+                _fragmentedBytes -= fragment.UserData.Length;
+                fragment.Dispose();
             }
         }
 
@@ -595,20 +664,11 @@ namespace SIPSorcery.Net
         /// or false if not.</returns>
         public static bool IsNewer(uint tsn, uint receivedTSN)
         {
-            if (tsn < uint.MaxValue / 2 && receivedTSN > uint.MaxValue / 2)
-            {
-                // TSN wrap has occurred and the received TSN is old.
-                return false;
-            }
-            else if (tsn > uint.MaxValue / 2 && receivedTSN < uint.MaxValue / 2)
-            {
-                // TSN wrap has occurred and the received TSN is new.
-                return true;
-            }
-            else
-            {
-                return receivedTSN > tsn;
-            }
+            // Serial number arithmetic (RFC 1982): newer means less than half the number space ahead.
+            // The old test compared each value against the midpoint, so it assumed a wrap whenever the
+            // two straddled 2^31: 0x80000005 was "old" next to 0x7FFFFFF0. A sender whose TSN crossed
+            // the midpoint then ignored every SACK for the rest of the association.
+            return unchecked((int)(receivedTSN - tsn)) > 0;
         }
 
         public static bool IsNewerOrEqual(uint tsn, uint receivedTSN)

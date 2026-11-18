@@ -395,7 +395,22 @@ namespace SIPSorcery.Net
             {
                 // RTCP reports are not critical enough to bubble the exception up to the application.
                 logger.LogError($"Exception SendReportTimerCallback. {excp.Message}");
-                m_rtcpReportTimer?.Dispose();
+
+                // Keep the timer going. It is one-shot and re-armed at the end of each callback, so an
+                // exception before that point (a report handler throwing, say) used to stop it for
+                // good, and it was disposed here as well: no more sender reports for the stream and
+                // no inactivity timeout, with nothing to show for it but this one log line.
+                if (!IsClosed)
+                {
+                    try
+                    {
+                        m_rtcpReportTimer?.Change(GetNextRtcpInterval(RTCP_MINIMUM_REPORT_PERIOD_MILLISECONDS), Timeout.Infinite);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Closed in the meantime.
+                    }
+                }
             }
         }
 

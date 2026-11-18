@@ -2377,7 +2377,10 @@ namespace SIPSorcery.Net
                 else
                 {
                     // Check if the packet is RTCP.
-                    if (Enum.IsDefined(typeof(RTCPReportTypesEnum), span[1]))
+                    // The RTCP packet types are 200 (SR) to 207 (XR) with no gaps. A range test, not
+                    // Enum.IsDefined, which boxes the byte and looks the value up by reflection, on
+                    // every packet received.
+                    if (span[1] >= (byte)RTCPReportTypesEnum.SR && span[1] <= (byte)RTCPReportTypesEnum.XR)
                     {
                         // Note: Not all RTCP packet types are part of a compound packet.
                         // This logic correctly dispatches the buffer to the RTCP handler.                       

@@ -241,6 +241,53 @@ namespace SIPSorcery.Net
             MessageMediaFormat =  messageMediaFormat;
         }
 
+        /// <summary>
+        /// The format IDs in the order the m= line listed them: the sender's order of preference
+        /// (RFC 3264 5.1). Only set for an announcement parsed from SDP.
+        /// </summary>
+        private List<int> _mediaFormatOrder;
+
+        /// <summary>
+        /// Puts <see cref="MediaFormats"/> into the order the m= line listed the formats in.
+        /// Called once the whole description has been parsed.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="ParseMediaFormats"/> can only add the well known static payload types when it
+        /// reads the m= line; a dynamic type has no definition until its a=rtpmap line turns up, and is
+        /// added then. That left every static type ahead of every dynamic one whatever the m= line
+        /// said: a browser offering "111 63 9 0 8" (Opus first) was read as preferring G722, PCMU and
+        /// PCMA, and since the offerer's order decides the codec, Opus was never chosen.
+        /// </remarks>
+        internal void RestoreMediaFormatOrder()
+        {
+            var order = _mediaFormatOrder;
+            if (order == null || order.Count < 2 || MediaFormats.Count < 2)
+            {
+                return;
+            }
+
+            var ordered = new Dictionary<int, SDPAudioVideoMediaFormat>(MediaFormats.Count);
+
+            foreach (int id in order)
+            {
+                if (!ordered.ContainsKey(id) && MediaFormats.TryGetValue(id, out var format))
+                {
+                    ordered.Add(id, format);
+                }
+            }
+
+            // Anything described by an attribute but missing from the m= line keeps its place after them.
+            foreach (var entry in MediaFormats)
+            {
+                if (!ordered.ContainsKey(entry.Key))
+                {
+                    ordered.Add(entry.Key, entry.Value);
+                }
+            }
+
+            MediaFormats = ordered;
+        }
+
         public void ParseMediaFormats(string formatList)
         {
             if (!String.IsNullOrWhiteSpace(formatList))
@@ -248,6 +295,18 @@ namespace SIPSorcery.Net
                 string[] formatIDs = Regex.Split(formatList, @"\s");
                 if (formatIDs != null)
                 {
+                    if (Media != SDPMediaTypesEnum.application && Media != SDPMediaTypesEnum.message)
+                    {
+                        _mediaFormatOrder = new List<int>(formatIDs.Length);
+                        foreach (string formatID in formatIDs)
+                        {
+                            if (Int32.TryParse(formatID, out int orderedID))
+                            {
+                                _mediaFormatOrder.Add(orderedID);
+                            }
+                        }
+                    }
+
                     foreach (string formatID in formatIDs)
                     {
                         if (Media == SDPMediaTypesEnum.application)

@@ -402,10 +402,21 @@ namespace SIPSorcery.Net
                             string abortReason = abortChunk.GetAbortReason();
                             var logLevel = abortChunk.ErrorCauses.Any(cause => cause.CauseCode == SctpErrorCauseCode.UserInitiatedAbort)
                                 ? LogLevel.Debug : LogLevel.Warning;
-                            logger.LogWarning("SCTP packet ABORT chunk received from remote party, reason {Message}.", abortReason);
+                            logger.Log(logLevel, "SCTP packet ABORT chunk received from remote party, reason {Message}.", abortReason);
                             _wasAborted = true;
                             _dataSender?.Close();
-                            OnAbortReceived?.Invoke(abortReason);
+                            try
+                            {
+                                OnAbortReceived?.Invoke(abortReason);
+                            }
+                            catch (Exception excp)
+                            {
+                                logger.LogError(excp, "SCTP abort received handler threw on association {ID}.", ID);
+                            }
+                            // The association is over. Without the state change nothing above it found out:
+                            // the transport stayed Connected and its data channels open, with every send
+                            // after that dropped behind a warning.
+                            SetState(SctpAssociationState.Closed);
                             break;
 
                         case var ct when ct == SctpChunkType.COOKIE_ACK && State != SctpAssociationState.CookieEchoed:
@@ -668,7 +679,16 @@ namespace SIPSorcery.Net
                 SetState(SctpAssociationState.ShutdownSent);
 
                 SctpShutdownChunk shutdownChunk = new SctpShutdownChunk(ackTSN);
-                SendChunk(shutdownChunk);
+                try
+                {
+                    SendChunk(shutdownChunk);
+                }
+                catch (Exception excp)
+                {
+                    // The transport may already be gone (the remote peer closed first). The sender must
+                    // still be closed: skipped, its thread kept retransmitting for the life of the process.
+                    logger.LogDebug(excp, "SCTP shutdown chunk could not be sent for association {ID}. {ErrorMessage}", ID, excp.Message);
+                }
 
                 _dataSender.Close();
             }
@@ -683,12 +703,24 @@ namespace SIPSorcery.Net
         {
             if (!_wasAborted)
             {
-                _wasAborted = true;
                 bool tBit = _remoteVerificationTag != 0;
                 var abortChunk = new SctpAbortChunk(tBit);
                 abortChunk.AddErrorCause(errorCause);
 
-                SendChunk(abortChunk);
+                // Sent before the association is marked aborted: SendChunk sends nothing once it is,
+                // so with the flag set first (as it was) the ABORT never left and the remote peer
+                // was not told.
+                try
+                {
+                    SendChunk(abortChunk);
+                }
+                catch (Exception excp)
+                {
+                    // As for Shutdown: the sender must still be closed.
+                    logger.LogDebug(excp, "SCTP abort chunk could not be sent for association {ID}. {ErrorMessage}", ID, excp.Message);
+                }
+
+                _wasAborted = true;
 
                 try
                 {
@@ -701,6 +733,9 @@ namespace SIPSorcery.Net
                 }
 
                 _dataSender.Close();
+
+                // As when an ABORT is received: tell the transport the association has gone.
+                SetState(SctpAssociationState.Closed);
             }
         }
 
@@ -763,14 +798,7 @@ namespace SIPSorcery.Net
         {
             if (!_wasAborted)
             {
-                SctpPacket pkt = new SctpPacket(
-                _sctpSourcePort,
-                _sctpDestinationPort,
-                _remoteVerificationTag);
-
-                pkt.AddChunk(chunk);
-
-                SendPacket(pkt);
+                _sctpTransport.Send(ID, _sctpSourcePort, _sctpDestinationPort, _remoteVerificationTag, chunk);
             }
         }
 

@@ -983,11 +983,14 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
             var ssrc = RtpReader.ReadSsrc(input);
             var sequenceNumber = RtpReader.ReadSequenceNumber(input);
 
+            // State for an SSRC not seen before is only kept once the packet has authenticated (below).
+            // It used to be added to the dictionary here, so every forged packet with a new SSRC from
+            // an accepted address left an entry behind for the life of the session.
             SsrcSrtpContext ssrcContext;
-            if (context.ReplayProtection.TryGetValue(ssrc, out ssrcContext) == false)
+            bool isNewSsrc = context.ReplayProtection.TryGetValue(ssrc, out ssrcContext) == false;
+            if (isNewSsrc)
             {
                 ssrcContext = new SsrcSrtpContext();
-                context.ReplayProtection.Add(ssrc, ssrcContext);
             }
 
             // Derive ROC/index for this packet from the last accepted index. For the first packet of an SSRC
@@ -1188,6 +1191,10 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
             // The packet has now been authenticated (HMAC above for HMAC profiles, or the AEAD decrypt
             // for GCM/CCM profiles). Only now is it safe to advance the replay window / ROC.
             // RFC 3711 section 3.3.
+            if (isNewSsrc)
+            {
+                context.ReplayProtection[ssrc] = ssrcContext;
+            }
             if (firstPacket)
             {
                 ssrcContext.SetSequence(index);
@@ -1416,11 +1423,12 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
             var ssrc = RtcpReader.ReadSsrc(input);
             var offset = RtcpReader.GetHeaderLen();
 
+            // As for SRTP: an SSRC not seen before is only remembered once its packet has authenticated.
             SsrcSrtpContext ssrcContext;
-            if (context.ReplayProtection.TryGetValue(ssrc, out ssrcContext) == false)
+            bool isNewSsrc = context.ReplayProtection.TryGetValue(ssrc, out ssrcContext) == false;
+            if (isNewSsrc)
             {
                 ssrcContext = new SsrcSrtpContext();
-                context.ReplayProtection.Add(ssrc, ssrcContext);
             }
 
             var originalIndex = RtcpReader.SrtcpReadIndex(input, tagAfterMki + mki.Length);
@@ -1567,6 +1575,10 @@ namespace SIPSorcery.Net.SharpSRTP.SRTP
 
             // The packet has now been authenticated (HMAC above for HMAC profiles, or the AEAD decrypt
             // for GCM/CCM profiles). Only now is it safe to advance the replay window.
+            if (isNewSsrc)
+            {
+                context.ReplayProtection[ssrc] = ssrcContext;
+            }
             ssrcContext.UpdateReplayWindow(index);
 
             return 0;

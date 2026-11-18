@@ -114,6 +114,29 @@ public class RTPHeader
         }
     }
 
+    /// <summary>
+    /// Writes the 12 byte fixed RTP header (version 2, no padding, no CSRCs, extension bit clear)
+    /// straight into <paramref name="destination"/> and returns the bytes written. For the send path:
+    /// building an <see cref="RTPHeader"/> there just to call <see cref="WriteTo"/> cost an object, three
+    /// arrays and three calls to the secure random generator per packet, since the parameterless
+    /// constructor fills in a random sequence number, SSRC and timestamp that were then overwritten.
+    /// </summary>
+    public static int WriteFixedHeader(Span<byte> destination, int markerBit, int payloadType, ushort sequenceNumber, uint timestamp, uint syncSource)
+    {
+        if (destination.Length < MIN_HEADER_LEN)
+        {
+            throw new ArgumentException("Destination buffer is too small for the RTP header.");
+        }
+
+        destination[0] = RTP_VERSION << 6;
+        destination[1] = (byte)(((markerBit & 0x1) << 7) | (payloadType & 0x7f));
+        BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(2), sequenceNumber);
+        BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(4), timestamp);
+        BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(8), syncSource);
+
+        return MIN_HEADER_LEN;
+    }
+
     public int WriteTo(Span<byte> destination)
     {
         if (destination.Length < Length)

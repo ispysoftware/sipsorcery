@@ -243,14 +243,9 @@ namespace SIPSorcery.Net
         {
             //logger.LogTrace($"WebRTC data channel GotData stream ID {streamID}, stream seqnum {streamSeqNum}, ppid {ppID}, label {label}.");
 
-            // If the ppID is not recognised default to binary.
-            DataChannelPayloadProtocols payloadType = DataChannelPayloadProtocols.WebRTC_Binary;
-
-            if (Enum.IsDefined(typeof(DataChannelPayloadProtocols), ppID))
-            {
-                payloadType = (DataChannelPayloadProtocols)ppID;
-            }
-
+            // The ppID is passed on as it arrived. (A check here used Enum.IsDefined, which boxes and
+            // reflects for every message, to work out a "default to binary" value that was then never
+            // used. Handlers already treat anything that isn't a string type as binary.)
             onmessage?.Invoke(this, (DataChannelPayloadProtocols)ppID, data);
         }
     }

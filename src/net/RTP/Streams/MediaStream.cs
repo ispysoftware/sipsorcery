@@ -574,7 +574,8 @@ namespace SIPSorcery.net.RTP
         /// protect, so its SRTP epoch check can't be invalidated by a concurrent send of
         /// seq 0xFFFF (which advances the sender ROC) in between.
         /// </summary>
-        private async Task ResendRtpPacketAsync(RtpRetransmitBuffer buffer, ushort seq)
+        /// <returns>The size of the packet resent, or 0 if nothing was sent for this seqnum.</returns>
+        private async Task<int> ResendRtpPacketAsync(RtpRetransmitBuffer buffer, ushort seq)
         {
             var extensions = GetSendHeaderExtensions();
             byte[] payload = null;
@@ -590,7 +591,7 @@ namespace SIPSorcery.net.RTP
                 {
                     if (!buffer.TryGetForResend(seq, out payload, out int length, out timestamp, out int markerBit, out int payloadType))
                     {
-                        return;
+                        return 0;
                     }
 
                     rentedBuffer = ArrayPool<byte>.Shared.Rent(GetMaxRtpPacketSize(length, extensions != null));
@@ -598,6 +599,8 @@ namespace SIPSorcery.net.RTP
                 }
 
                 await SendBuiltRtpPacketAsync(wirePacket, packetLength, seq, timestamp, isRetransmission: true).ConfigureAwait(false);
+
+                return packetLength;
             }
             finally
             {
@@ -645,19 +648,8 @@ namespace SIPSorcery.net.RTP
             var packetSpan = packetBuffer.AsSpan();
             int cursor = 0;
 
-            var header = new RTPHeader
-            {
-                SyncSource = LocalTrack.Ssrc,
-                SequenceNumber = seq,
-                Timestamp = timestamp,
-                MarkerBit = markerBit,
-                PayloadType = payloadType,
-                // The extension flag will be set later if extensions are successfully written.
-                HeaderExtensionFlag = 0
-            };
-
-            // A. Write the main 12-byte header. We will patch the extension bit later if needed.
-            cursor += header.WriteTo(packetSpan);
+            // A. Write the main 12-byte header. The extension bit is patched in later if extensions are written.
+            cursor += RTPHeader.WriteFixedHeader(packetSpan, markerBit, payloadType, seq, timestamp, LocalTrack.Ssrc);
 
             if (extensions != null)
             {
@@ -685,9 +677,10 @@ namespace SIPSorcery.net.RTP
                     if (ext is TransportWideCCExtension twccExt)
                     {
                         // The wire value is the low 16 bits. Marshalled from the local value,
-                        // not the shared extension object's SequenceNumber.
+                        // not the shared extension object's SequenceNumber (which is not updated
+                        // here: its setter takes an object, so it boxed the seqnum on every packet
+                        // for a value nothing on the send path reads).
                         var twccSeq = unchecked((ushort)Interlocked.Increment(ref _twccPacketCount));
-                        twccExt.Set(twccSeq);
                         TwccSentPackets.RecordSend(twccSeq, Stopwatch.GetTimestamp());
                         bytesWritten = twccExt.Marshal(packetSpan.Slice(currentExtensionCursor), twccSeq);
                     }
@@ -841,7 +834,68 @@ namespace SIPSorcery.net.RTP
 
             foreach (var seq in nack.GetSequenceNumbers())
             {
-                await ResendRtpPacketAsync(buffer, seq).ConfigureAwait(false);
+                if (!HasNackBudget())
+                {
+                    // Out of budget: leave the rest. They are not marked as resent, so the receiver's
+                    // next NACK (it repeats them every few tens of ms) gets them once the budget has refilled.
+                    logger.LogDebug("RTP NACK retransmissions paused, the retransmission budget is spent.");
+                    break;
+                }
+
+                int sent = await ResendRtpPacketAsync(buffer, seq).ConfigureAwait(false);
+                if (sent > 0)
+                {
+                    ChargeNackBudget(sent);
+                }
+            }
+        }
+
+        // Retransmissions go straight to the wire, past the pacer, so that a repair is not queued
+        // behind new video. Unbounded, a NACK for the lost tail of a keyframe (tens to hundreds of
+        // packets) went back out as one burst at line rate: the very burst the pacer exists to
+        // prevent, sent into the link that had just dropped those packets. So they draw on a token
+        // bucket: half the media target rate, holding at most a quarter of a second of that, and never
+        // less than a couple of dozen packets so that ordinary scattered loss is repaired at once.
+        // Only applies while pacing is on (a target bitrate has been set).
+        private const double NACK_BUDGET_RATE_FRACTION = 0.5;
+        private const double NACK_BUDGET_WINDOW_SECONDS = 0.25;
+        private const double NACK_BUDGET_MIN_BYTES = 24 * RTPSession.RTP_MAX_PAYLOAD;
+
+        private readonly object _nackBudgetLock = new object();
+        private double _nackBudgetBytes = NACK_BUDGET_MIN_BYTES;
+        private long _nackBudgetUpdatedAt;
+
+        /// <summary>
+        /// True if a NACK retransmission may be sent now. Refills the budget for the time since the last call.
+        /// </summary>
+        private bool HasNackBudget()
+        {
+            double rate = (Pacer?.TargetBytesPerSecond ?? 0) * NACK_BUDGET_RATE_FRACTION;
+            if (rate <= 0)
+            {
+                return true;
+            }
+
+            lock (_nackBudgetLock)
+            {
+                long now = Stopwatch.GetTimestamp();
+                if (_nackBudgetUpdatedAt != 0)
+                {
+                    double capacity = Math.Max(NACK_BUDGET_MIN_BYTES, rate * NACK_BUDGET_WINDOW_SECONDS);
+                    double elapsedSeconds = (double)(now - _nackBudgetUpdatedAt) / Stopwatch.Frequency;
+                    _nackBudgetBytes = Math.Min(capacity, _nackBudgetBytes + rate * elapsedSeconds);
+                }
+                _nackBudgetUpdatedAt = now;
+
+                return _nackBudgetBytes > 0;
+            }
+        }
+
+        private void ChargeNackBudget(int bytes)
+        {
+            lock (_nackBudgetLock)
+            {
+                _nackBudgetBytes -= bytes;
             }
         }
 

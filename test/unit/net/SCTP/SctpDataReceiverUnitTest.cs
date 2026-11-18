@@ -360,19 +360,19 @@ namespace SIPSorcery.Net.UnitTests
         [Fact]
         public void StreamPacketsReceviedOutOfOrder()
         {
-            SctpDataReceiver receiver = new SctpDataReceiver(0, 0, uint.MaxValue);
+            // The stream's first message (seqnum 0) arrives last: nothing may be delivered ahead of it.
+            // A stream starts at seqnum 0, so the receiver must not take the first frame to arrive
+            // as the start of the stream.
+            SctpDataReceiver receiver = new SctpDataReceiver(0, 0, 0);
 
-            SctpDataChunk chunk0 = new SctpDataChunk(false, true, true, uint.MaxValue, 0, ushort.MaxValue, 0, new byte[] { 0x00 });
             SctpDataChunk chunk1 = new SctpDataChunk(false, true, true, 0, 0, 0, 0, new byte[] { 0x00 });
             SctpDataChunk chunk2 = new SctpDataChunk(false, true, true, 1, 0, 1, 0, new byte[] { 0x01 });
             SctpDataChunk chunk3 = new SctpDataChunk(false, true, true, 2, 0, 2, 0, new byte[] { 0x02 });
 
-            var sortFrames0 = receiver.OnDataChunk(chunk0);
             var sortFrames1 = receiver.OnDataChunk(chunk3);
             var sortFrames2 = receiver.OnDataChunk(chunk2);
             var sortFrames3 = receiver.OnDataChunk(chunk1);
 
-            Assert.Single(sortFrames0);
             Assert.Empty(sortFrames1);
             Assert.Empty(sortFrames2);
             Assert.Equal(3, sortFrames3.Count);

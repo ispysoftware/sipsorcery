@@ -125,12 +125,28 @@ namespace SIPSorcery.Net
         {
             if (CheckIfCanSendRtpRaw())
             {
-                // This assumes H264Packetiser.ParseNals is updated to accept a ReadOnlySpan
-                // and yield a struct/tuple containing a ReadOnlyMemory<byte> for the NAL.
-                foreach (var nalInfo in H264Packetiser.ParseNals(accessUnit))
+                // The NALs are found one at a time, each a slice of the caller's memory, with nothing
+                // allocated per frame. The one after is looked up before a NAL is sent because the
+                // last NAL of the frame has to be flagged (it carries the RTP marker bit).
+                int position = 0;
+                if (!H264Packetiser.TryNextNal(accessUnit.Span, ref position, out int nalStart, out int nalLength))
                 {
-                    // .Span is used to get the ReadOnlySpan<byte> from the ReadOnlyMemory<byte>
-                    await SendH26XNalAsync(duration, payloadTypeID, nalInfo.NAL, nalInfo.IsLast);
+                    return;
+                }
+
+                while (true)
+                {
+                    bool hasNext = H264Packetiser.TryNextNal(accessUnit.Span, ref position, out int nextStart, out int nextLength);
+
+                    await SendH26XNalAsync(duration, payloadTypeID, accessUnit.Slice(nalStart, nalLength), !hasNext).ConfigureAwait(false);
+
+                    if (!hasNext)
+                    {
+                        break;
+                    }
+
+                    nalStart = nextStart;
+                    nalLength = nextLength;
                 }
             }
         }

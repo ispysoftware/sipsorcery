@@ -312,7 +312,7 @@ namespace SIPSorcery.Net
         public string RemoteIceUser { get; private set; }
         public string RemoteIcePassword { get; private set; }
 
-        private bool _closed = false;
+        private volatile bool _closed = false;
         private Timer _connectivityChecksTimer;
         private Timer _processIceServersTimer;
         private Timer _refreshTurnTimer;
@@ -1052,7 +1052,10 @@ namespace SIPSorcery.Net
 
                 if ((turnServer._uri.Scheme != STUNSchemesEnum.turn && turnServer._uri.Scheme != STUNSchemesEnum.turns) || nominatedLocal.IceServer is null)
                 {
-                    _refreshTurnTimer?.Dispose();
+                    // Nothing to refresh while the nominated pair isn't relayed, but the timer stays: the
+                    // nomination can move to the relay pair later (the direct path dies mid-session), and
+                    // nothing else restarts it. Disposing it here left that pair's permission and
+                    // allocation to lapse a few minutes after the switch.
                     return;
                 }
                 if (turnServer.TurnTimeToExpiry - Environment.TickCount64 <= 60_000)
@@ -1153,13 +1156,29 @@ namespace SIPSorcery.Net
         /// </summary>
         private async void CheckIceServers(Object state)
         {
-            if (_closed || IceGatheringState == RTCIceGatheringState.complete ||
+            if (_closed)
+            {
+                // Close has disposed the timers. A tick already dispatched still gets here, and used to
+                // go on to create a refresh timer nobody would ever dispose: it kept this channel, and
+                // through its events the whole peer connection, alive and ticking for the life of the process.
+                return;
+            }
+
+            if (IceGatheringState == RTCIceGatheringState.complete ||
                 !(IceConnectionState == RTCIceConnectionState.@new || IceConnectionState == RTCIceConnectionState.checking))
             {
                 logger.LogDebug($"ICE RTP channel stopping ICE server checks in gathering state {IceGatheringState} and connection state {IceConnectionState}.");
-                _refreshTurnTimer?.Dispose();
-                _refreshTurnTimer = new Timer(RefreshTurnAsync);
-                _refreshTurnTimer.Change(0, 2000);
+
+                // Started by the constructor rather than a later Change, which throws if Close disposes
+                // the timer in between. The exchange leaves no timer behind when two ticks overlap.
+                var refreshTimer = new Timer(RefreshTurnAsync, null, 0, 2000);
+                Interlocked.Exchange(ref _refreshTurnTimer, refreshTimer)?.Dispose();
+                if (_closed)
+                {
+                    // Close ran while the timer was being created and may have missed it.
+                    refreshTimer.Dispose();
+                }
+
                 _processIceServersTimer.Dispose();
                 return;
             }
@@ -1434,16 +1453,26 @@ namespace SIPSorcery.Net
                 else
                 {
                     // The candidate string can be a hostname or an IP address.
-                    var lookupResult = await _dnsLookupClient.QueryAsync(remoteCandidate.address, DnsClient.QueryType.A).ConfigureAwait(false);
-
-                    if (lookupResult.Answers.Count > 0)
+                    // The DNS client only exists if an ICE server needed a lookup. With none, a
+                    // hostname candidate used to dereference null here.
+                    var dnsLookupClient = _dnsLookupClient;
+                    if (dnsLookupClient == null)
                     {
-                        remoteCandidateIPAddr = lookupResult.Answers.AddressRecords().FirstOrDefault()?.Address;
-                        logger.LogWarning($"RTP ICE channel resolved remote candidate {remoteCandidate.address} to {remoteCandidateIPAddr}.");
+                        logger.LogWarning($"RTP ICE channel cannot resolve remote candidate {remoteCandidate.address}: no DNS client is available.");
                     }
                     else
                     {
-                        logger.LogDebug($"RTP ICE channel failed to resolve remote candidate {remoteCandidate.address}.");
+                        var lookupResult = await dnsLookupClient.QueryAsync(remoteCandidate.address, DnsClient.QueryType.A).ConfigureAwait(false);
+
+                        if (lookupResult.Answers.Count > 0)
+                        {
+                            remoteCandidateIPAddr = lookupResult.Answers.AddressRecords().FirstOrDefault()?.Address;
+                            logger.LogWarning($"RTP ICE channel resolved remote candidate {remoteCandidate.address} to {remoteCandidateIPAddr}.");
+                        }
+                        else
+                        {
+                            logger.LogDebug($"RTP ICE channel failed to resolve remote candidate {remoteCandidate.address}.");
+                        }
                     }
 
                     if (remoteCandidateIPAddr != null)
@@ -1479,10 +1508,15 @@ namespace SIPSorcery.Net
                     supportsIPv6 = base.RtpSocket.AddressFamily == AddressFamily.InterNetworkV6 || base.IsDualMode;
                 }
 
+                // From the end point, not the address resolved by this call: the candidate is shared
+                // with the other checklist's call, which can have set the end point when this one's
+                // own lookup found nothing (the local was then null here).
+                var remoteAddressFamily = remoteCandidate.DestinationEndPoint.AddressFamily;
+
                 lock (_checklist)
                 {
-                    if (remoteCandidateIPAddr.AddressFamily == AddressFamily.InterNetwork && supportsIPv4 ||
-                        remoteCandidateIPAddr.AddressFamily == AddressFamily.InterNetworkV6 && supportsIPv6)
+                    if (remoteAddressFamily == AddressFamily.InterNetwork && supportsIPv4 ||
+                        remoteAddressFamily == AddressFamily.InterNetworkV6 && supportsIPv6)
                     {
                         ChecklistEntry entry = new ChecklistEntry(localCandidate, remoteCandidate, IsController);
 
@@ -1571,24 +1605,49 @@ namespace SIPSorcery.Net
                 return;
             }
 
-            switch (IceConnectionState)
+            // A timer callback: nothing above this catches, and the connected-pair check raises the
+            // connection state events (so runs the application's handlers) on this thread. An
+            // exception escaping here ends the process.
+            try
             {
-                case RTCIceConnectionState.@new:
-                case RTCIceConnectionState.checking:
-                    ProcessChecklist();
-                    break;
+                switch (IceConnectionState)
+                {
+                    case RTCIceConnectionState.@new:
+                    case RTCIceConnectionState.checking:
+                        ProcessChecklist();
+                        break;
 
-                case RTCIceConnectionState.connected:
-                case RTCIceConnectionState.disconnected:
-                    // Periodic checks on the nominated peer.
-                    SendCheckOnConnectedPair(NominatedEntry);
-                    break;
+                    case RTCIceConnectionState.connected:
+                    case RTCIceConnectionState.disconnected:
+                        // Periodic checks on the nominated peer.
+                        SendCheckOnConnectedPair(NominatedEntry);
+                        break;
 
-                case RTCIceConnectionState.failed:
-                case RTCIceConnectionState.closed:
-                    logger.LogDebug($"ICE RTP channel stopping connectivity checks in connection state {IceConnectionState}.");
-                    _connectivityChecksTimer?.Dispose();
-                    break;
+                    case RTCIceConnectionState.failed:
+                    case RTCIceConnectionState.closed:
+                        logger.LogDebug($"ICE RTP channel stopping connectivity checks in connection state {IceConnectionState}.");
+                        _connectivityChecksTimer?.Dispose();
+                        break;
+                }
+            }
+            catch (Exception excp)
+            {
+                logger.LogError(excp, "Exception in ICE connectivity check. {ErrorMessage}", excp.Message);
+            }
+        }
+
+        /// <summary>
+        /// Observes a task that nothing awaits, so a failure is logged rather than lost.
+        /// </summary>
+        private async Task LogFaultAsync(Task task, string activity)
+        {
+            try
+            {
+                await task.ConfigureAwait(false);
+            }
+            catch (Exception excp)
+            {
+                logger.LogWarning(excp, "ICE RTP channel exception {Activity}. {ErrorMessage}", activity, excp.Message);
             }
         }
 
@@ -1599,6 +1658,21 @@ namespace SIPSorcery.Net
         /// The scheduling mechanism for ICE is specified in https://tools.ietf.org/html/rfc8445#section-6.1.4.
         /// </remarks>
         private async void ProcessChecklist()
+        {
+            // async void: an exception leaving it is rethrown on the thread pool with nothing to
+            // catch it, which ends the process. A remote candidate is enough to cause one (its
+            // address goes to a DNS lookup, see UpdateChecklist).
+            try
+            {
+                await ProcessChecklistAsync().ConfigureAwait(false);
+            }
+            catch (Exception excp)
+            {
+                logger.LogError(excp, "Exception processing the ICE checklist. {ErrorMessage}", excp.Message);
+            }
+        }
+
+        private async Task ProcessChecklistAsync()
         {
             if (!_closed && (IceConnectionState == RTCIceConnectionState.@new ||
                 IceConnectionState == RTCIceConnectionState.checking))
@@ -1613,15 +1687,16 @@ namespace SIPSorcery.Net
                             // contain a hostname and require a DNS lookup. There's nothing that can be done
                             // if the DNS lookup fails so initiate the task and then keep going with
                             // adding any other pending candidates and move on with processing the check list.
-                            _ = UpdateChecklist(_localChecklistCandidate, candidate);
+                            _ = LogFaultAsync(UpdateChecklist(_localChecklistCandidate, candidate), "adding a remote candidate to the checklist");
                         }
 
                         // If a relay server is available add a checklist entry for it as well.
                         if (_relayChecklistCandidate != null)
                         {
-                            // The local relay candidate has already been checked and any hostnames 
+                            // The local relay candidate has already been checked and any hostnames
                             // resolved when the ICE servers were checked.
-                            await UpdateChecklist(_relayChecklistCandidate, candidate).ConfigureAwait(false);
+                            // A candidate that can't be added must not stop the ones queued behind it.
+                            await LogFaultAsync(UpdateChecklist(_relayChecklistCandidate, candidate), "adding a remote candidate to the relay checklist").ConfigureAwait(false);
                         }
                     }
                 }
@@ -1641,6 +1716,9 @@ namespace SIPSorcery.Net
                         {
                             logger.LogWarning("ICE RTP channel checklist processing cannot occur as either the remote ICE user or password are not set.");
                             IceConnectionState = RTCIceConnectionState.failed;
+                            // Tell the peer connection, as the other failures below do. Without the
+                            // event it stayed in its connecting state for good.
+                            OnIceConnectionStateChange?.Invoke(IceConnectionState);
                         }
                         else
                         {
@@ -3157,7 +3235,7 @@ namespace SIPSorcery.Net
                         // Too short to be a STUN message.
                         return;
                     }
-                    _ = ProcessStunMessage(stunMessage, finalRemoteEndPoint, wasRelayed);
+                    _ = LogFaultAsync(ProcessStunMessage(stunMessage, finalRemoteEndPoint, wasRelayed), "processing a STUN message");
                 }
                 else
                 {

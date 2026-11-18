@@ -300,7 +300,15 @@ namespace SIPSorcery.Net
 
                 // Await the async operation directly. THIS IS THE KEY CHANGE.
                 // It is non-blocking and frees the calling thread.
-                await sendSocket.SendToAsync(buffer, SocketFlags.None, dstEndPoint).ConfigureAwait(false);
+                var socketAddress = ReferenceEquals(sendSocket, RtpSocket) ? GetRtpSendAddress(sendSocket, dstEndPoint) : null;
+                if (socketAddress != null)
+                {
+                    await sendSocket.SendToAsync(buffer, SocketFlags.None, socketAddress).ConfigureAwait(false);
+                }
+                else
+                {
+                    await sendSocket.SendToAsync(buffer, SocketFlags.None, dstEndPoint).ConfigureAwait(false);
+                }
 
                 return SocketError.Success;
             }
@@ -320,6 +328,63 @@ namespace SIPSorcery.Net
                 if (sendSocket != null) EndSendTo(excp, dstEndPoint, sendSocket, onFailure);
                 return SocketError.Fault;
             }
+        }
+
+        /// <summary>
+        /// The serialised form of the destination the RTP socket last sent to.
+        /// </summary>
+        private sealed class SendTarget
+        {
+            public IPAddress Address;
+            public int Port;
+            /// <summary>Null if this destination has to go through the EndPoint overload.</summary>
+            public SocketAddress SocketAddress;
+        }
+
+        private volatile SendTarget _rtpSendTarget;
+
+        /// <summary>
+        /// Gets the destination as a SocketAddress, kept from the last send while the destination is
+        /// unchanged. SendToAsync with an EndPoint serialises it on every call, and on a dual mode
+        /// socket sending to an IPv4 address (the usual case here: the socket is bound to [::])
+        /// it also builds a mapped address and end point first: about 220 bytes allocated per
+        /// packet, measured. With a SocketAddress it allocates nothing. Nearly every packet a
+        /// connected channel sends goes to the one destination, so a single entry is enough; a send
+        /// to anywhere else just replaces it.
+        /// </summary>
+        /// <returns>The address to send to, or null to use the EndPoint overload.</returns>
+        private SocketAddress GetRtpSendAddress(Socket sendSocket, IPEndPoint dstEndPoint)
+        {
+            // Compared by value: callers reuse and even rewrite their IPEndPoint instances.
+            var target = _rtpSendTarget;
+            if (target != null && target.Port == dstEndPoint.Port && target.Address.Equals(dstEndPoint.Address))
+            {
+                return target.SocketAddress;
+            }
+
+            target = new SendTarget { Address = dstEndPoint.Address, Port = dstEndPoint.Port };
+
+            try
+            {
+                if (dstEndPoint.AddressFamily == sendSocket.AddressFamily)
+                {
+                    target.SocketAddress = dstEndPoint.Serialize();
+                }
+                else if (dstEndPoint.AddressFamily == AddressFamily.InterNetwork &&
+                    sendSocket.AddressFamily == AddressFamily.InterNetworkV6 && sendSocket.DualMode)
+                {
+                    // What the EndPoint overload does for a dual mode socket.
+                    target.SocketAddress = new IPEndPoint(dstEndPoint.Address.MapToIPv6(), dstEndPoint.Port).Serialize();
+                }
+            }
+            catch (Exception excp) when (excp is SocketException || excp is ObjectDisposedException || excp is NotSupportedException)
+            {
+                // Leave it null: the EndPoint overload reports whatever is wrong with the socket.
+                target.SocketAddress = null;
+            }
+
+            _rtpSendTarget = target;
+            return target.SocketAddress;
         }
 
         readonly AsyncCallback endSendTo;

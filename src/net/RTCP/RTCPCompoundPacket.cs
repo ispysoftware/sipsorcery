@@ -146,12 +146,26 @@ namespace SIPSorcery.Net
                             offset += (Feedback != null) ? (Feedback.Header.Length + 1) * 4 : Int32.MaxValue;
                             break;
                         default:
-                            offset = Int32.MaxValue;
-                            logger.LogWarning("RTCPCompoundPacket did not recognise packet type ID {PacketTypeID}. {Packet}", packetTypeID, buffer.HexStr());
+                            // A packet type that isn't parsed here (APP, XR, ...) is stepped over by the
+                            // length in its header, like the rest. It used to end the parse, so any NACK
+                            // or transport feedback after it in the same compound packet was lost, and it
+                            // hex dumped what was left of the buffer at warning level every time.
+                            logger.LogDebug("RTCPCompoundPacket skipping packet type ID {PacketTypeID}.", packetTypeID);
+                            offset += GetPacketLength(buffer);
                             break;
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// The on-wire length of the RTCP packet at the start of the buffer: its header's length
+        /// field is the packet's size in 32 bit words, less one. Always at least 4, so a parse that
+        /// advances by it always makes progress.
+        /// </summary>
+        private static int GetPacketLength(ReadOnlySpan<byte> buffer)
+        {
+            return ((buffer[2] << 8 | buffer[3]) + 1) * 4;
         }
 
         /// <summary>
@@ -330,9 +344,9 @@ namespace SIPSorcery.Net
                                 : Int32.MaxValue;
                             break;
                         default:
-                            logger.LogWarning($"RTCPCompoundPacket did not recognise packet type ID {packetTypeID}.");
-                            offset = Int32.MaxValue;
-                            logger.LogWarning(packet.HexStr());
+                            // Stepped over by its header length, as in the constructor above.
+                            logger.LogDebug("RTCPCompoundPacket skipping packet type ID {PacketTypeID}.", packetTypeID);
+                            offset += GetPacketLength(buffer);
                             break;
                     }
                 }

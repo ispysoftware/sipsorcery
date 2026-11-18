@@ -18,8 +18,6 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
-using Concentus;
-using Concentus.Enums;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Sys;
 using SIPSorceryMedia.Abstractions;
@@ -29,20 +27,12 @@ namespace SIPSorcery.Media
     public class AudioEncoder : IAudioEncoder, IDisposable
     {
         private const int G722_BIT_RATE = 64000;              // G722 sampling rate is 16KHz with bits per sample of 16.
-        private const int OPUS_SAMPLE_RATE = 48000;           // Opus codec sampling rate, 48KHz.
-        private const int OPUS_CHANNELS = 2;                  // Opus codec number of channels.
 
-        /// <summary>
-        /// The max frame size that the OPUS encoder will accept is 2880 bytes (see IOpusEncoder.Encode).
-        /// 2880 corresponds to a sample size of 30ms for a single channel at 48Khz with 16 bit PCM. Therefore
-        /// the max sample size supported by OPUS is 30ms.
-        /// </summary>
-        private const int OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL = 2880;
-
-        /// <summary>
-        /// OPUS max encode size (see IOpusEncoder.Encode).
-        /// </summary>
-        private const int OPUS_MAXIMUM_ENCODED_FRAME_SIZE = 1275;
+        // Opus is not handled here. It was, through Concentus (a managed port of libopus), which
+        // allocates about 52KB for every 20ms frame it encodes. That dependency has been removed:
+        // an application that offers Opus supplies its own encoder (Agent DVR uses FFmpeg's
+        // libopus), and asking this class to encode or decode Opus throws like any other format
+        // it does not know.
 
         private static ILogger logger = Log.Logger;
 
@@ -55,10 +45,6 @@ namespace SIPSorcery.Media
 
         private G729Encoder _g729Encoder;
         private G729Decoder _g729Decoder;
-
-        private IOpusDecoder _opusDecoder;
-        private IOpusEncoder _opusEncoder;
-        private int _opusEncoderRate;
 
         private List<AudioFormat> _linearFormats = new List<AudioFormat>
         {
@@ -75,10 +61,6 @@ namespace SIPSorcery.Media
             new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA),
             new AudioFormat(SDPWellKnownMediaFormatsEnum.G722),
             new AudioFormat(SDPWellKnownMediaFormatsEnum.G729),
-
-            // Need more testing before adding OPUS by default. 24 Dec 2024 AC.
-            //new AudioFormat(111, AudioCodecsEnum.OPUS.ToString(), OPUS_SAMPLE_RATE, OPUS_CHANNELS, "useinbandfec=1")
-            // AudioCommonlyUsedFormats.OpusWebRTC
         };
 
         public List<AudioFormat> SupportedFormats
@@ -92,16 +74,11 @@ namespace SIPSorcery.Media
         /// <param name="includeLinearFormats">If set to true the linear audio formats will be added
         /// to the list of supported formats. The reason they are only included if explicitly requested
         /// is they are not very popular for other VoIP systems and therefore needlessly pollute the SDP.</param>
-        public AudioEncoder(bool includeLinearFormats = false, bool includeOpus = false)
+        public AudioEncoder(bool includeLinearFormats = false)
         {
             if (includeLinearFormats)
             {
                 _supportedFormats.AddRange(_linearFormats);
-            }
-
-            if (includeOpus)
-            {
-                _supportedFormats.Add(AudioCommonlyUsedFormats.OpusWebRTC);
             }
         }
 
@@ -190,46 +167,6 @@ namespace SIPSorcery.Media
                 pcmBytes.CopyTo(destination);
                 return pcmBytes.Length;
             }
-            else if (format.Codec == AudioCodecsEnum.OPUS)
-            {
-                // The PCM rate is the format's ClockRate: Opus encodes 8/12/16/24/48 kHz natively,
-                // so a caller with narrower input sets ClockRate to it rather than resampling to
-                // 48k (the RTP clock stays 48k regardless - RFC 7587). Anything else is taken as 48k.
-                var inputRate = format.ClockRate;
-                if (inputRate != 8000 && inputRate != 12000 && inputRate != 16000 && inputRate != 24000)
-                    inputRate = OPUS_SAMPLE_RATE;
-                var channelCount = format.ChannelCount > 0 ? format.ChannelCount : OPUS_CHANNELS;
-                if (_opusEncoder == null || _opusEncoderRate != inputRate || _opusEncoder.NumChannels != channelCount)
-                {
-                    (_opusEncoder as IDisposable)?.Dispose();
-                    _opusEncoder = null; // a throwing CreateEncoder must not leave the disposed one in place
-                    _opusEncoder = OpusCodecFactory.CreateEncoder(inputRate, channelCount, OpusApplication.OPUS_APPLICATION_VOIP);
-                    _opusEncoder.Complexity = 5;
-                    _opusEncoder.UseInbandFEC = true;
-                    _opusEncoderRate = inputRate;
-                }
-
-                int samplesPerChannel = pcm.Length / _opusEncoder.NumChannels;
-
-                // 2. The check now correctly compares samples-per-channel to the limit.
-                if (samplesPerChannel > OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL)
-                {
-                    logger.LogWarning($"OPUS input sample count per channel ({samplesPerChannel}) exceeded maximum limit ({OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL}).");
-                    return 0;
-                }
-
-                Span<byte> tempBuffer = stackalloc byte[OPUS_MAXIMUM_ENCODED_FRAME_SIZE];
-
-                // 3. Pass the correct samples-per-channel count to the encoder.
-                int encodedLength = _opusEncoder.Encode(pcm, samplesPerChannel, tempBuffer, tempBuffer.Length);
-
-                // --- FIX ENDS HERE ---
-
-                if (destination.Length < encodedLength) return 0;
-
-                tempBuffer.Slice(0, encodedLength).CopyTo(destination);
-                return encodedLength;
-            }
             else
             {
                 throw new ApplicationException($"Audio format {format.Codec} cannot be encoded.");
@@ -287,36 +224,6 @@ namespace SIPSorcery.Media
                 // arrive from somewhere like the SkypeBot SDK they will be in little endian format).
                 return encodedSample.Where((x, i) => i % 2 == 0).Select((y, i) => (short)(encodedSample[i * 2 + 1] << 8 | encodedSample[i * 2])).ToArray();
             }
-            else if (format.Codec == AudioCodecsEnum.OPUS)
-            {
-                if (_opusDecoder == null)
-                {
-                    var channelCount = format.ChannelCount > 0 ? format.ChannelCount : OPUS_CHANNELS;
-                    _opusDecoder = OpusCodecFactory.CreateDecoder(format.ClockRate, channelCount);
-                }
-
-                int maxSamples = OPUS_MAXIMUM_INPUT_SAMPLES_PER_CHANNEL * _opusDecoder.NumChannels;
-                float[] floatBuf = new float[maxSamples];
-
-                // Decode returns the number of samples per channel.
-                int samplesPerChannel = _opusDecoder.Decode(
-                    encodedSample,
-                    floatBuf,
-                    floatBuf.Length,
-                    false);
-
-                int totalFloats = samplesPerChannel * _opusDecoder.NumChannels;
-
-                // Convert to 16-bit interleaved PCM.
-                short[] pcm16 = new short[totalFloats];
-                for (int i = 0; i < totalFloats; i++)
-                {
-                    var f = ClampToFloat(floatBuf[i], -1.0f, 1.0f);
-                    pcm16[i] = (short)(f * 32767);
-                }
-
-                return pcm16;
-            }
             else
             {
                 throw new ApplicationException($"Audio format {format.Codec} cannot be decoded.");
@@ -329,21 +236,12 @@ namespace SIPSorcery.Media
             return PcmResampler.Resample(pcm, inRate, outRate);
         }
 
-        private float ClampToFloat(float value, float min, float max)
-        {
-            if (value < min) { return min; }
-            if (value > max) { return max; }
-            return value;
-        }
-
         protected virtual void Dispose(bool disposing)
         {
             if (!_disposedValue)
             {
                 if (disposing)
                 {
-                    (_opusEncoder as IDisposable)?.Dispose();
-                    (_opusDecoder as IDisposable)?.Dispose();
                     (_g729Encoder as IDisposable)?.Dispose();
                     (_g729Decoder as IDisposable)?.Dispose();
                 }

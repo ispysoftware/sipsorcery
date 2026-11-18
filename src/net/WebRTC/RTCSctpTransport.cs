@@ -193,17 +193,24 @@ namespace SIPSorcery.Net
         /// </summary>
         public void Close()
         {
-            if (state == RTCSctpTransportState.Connected)
+            try
             {
-                RTCSctpAssociation?.Shutdown();
+                if (state == RTCSctpTransportState.Connected)
+                {
+                    RTCSctpAssociation?.Shutdown();
+                }
+                else
+                {
+                    // If not connected (e.g. still in Connecting state), Shutdown() won't be called
+                    // which means the data sender thread won't be stopped. Abort ensures cleanup.
+                    RTCSctpAssociation?.Abort(new SctpErrorUserInitiatedAbort { AbortReason = "SCTP transport closing." });
+                }
             }
-            else
+            finally
             {
-                // If not connected (e.g. still in Connecting state), Shutdown() won't be called
-                // which means the data sender thread won't be stopped. Abort ensures cleanup.
-                RTCSctpAssociation?.Abort(new SctpErrorUserInitiatedAbort { AbortReason = "SCTP transport closing." });
+                // Whatever happened above, the receive thread must be told to stop.
+                _isClosed.TryMarkOccurred();
             }
-            _isClosed.TryMarkOccurred();
         }
 
         /// <summary>
@@ -217,8 +224,14 @@ namespace SIPSorcery.Net
             {
                 SetState(RTCSctpTransportState.Connected);
             }
-            else if (associationState == SctpAssociationState.Closed)
+            else if (associationState == SctpAssociationState.Closed ||
+                     associationState == SctpAssociationState.ShutdownAckSent)
             {
+                // ShutdownAckSent: the remote peer has shut the association down and its sender here is
+                // closed. Only the peer's SHUTDOWN COMPLETE is still to come, and if that is lost the
+                // association never reaches Closed, so the transport is finished from this point.
+                // (Raised again when Closed follows; the transport also starts out Closed, and a
+                // caller waiting for it to connect relies on the event to learn that it never did.)
                 SetState(RTCSctpTransportState.Closed);
             }
         }
@@ -273,12 +286,13 @@ namespace SIPSorcery.Net
         /// </summary>
         private void DoReceive(object state)
         {
-#if NET6_0_OR_GREATER
-            Span<byte> recvBuffer = stackalloc byte[checked((int)SctpAssociation.DEFAULT_ADVERTISED_RECEIVE_WINDOW)];
-#else
-            byte[] recvBufferArray = new byte[SctpAssociation.DEFAULT_ADVERTISED_RECEIVE_WINDOW];
+            // One DTLS record's worth, on the heap. This was a 256KB stackalloc (the SCTP receive
+            // window, which has nothing to do with the size of a datagram): a quarter of this thread's
+            // stack, zeroed at start, with every chunk handler and the application's data channel
+            // handlers running on what was left of it.
+            int recvBufferSize = Math.Clamp(transport.GetReceiveLimit(), 2048, 65536);
+            byte[] recvBufferArray = GC.AllocateUninitializedArray<byte>(recvBufferSize);
             Span<byte> recvBuffer = recvBufferArray.AsSpan();
-#endif
 
             bool dtlsClosed = false;
 

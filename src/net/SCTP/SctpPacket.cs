@@ -60,29 +60,43 @@ namespace SIPSorcery.Net
             return crc ^ 0xffffffff;
         }
 
+        /// <summary>The value a CRC32c calculation starts from, for <see cref="Append"/>.</summary>
+        internal const uint SEED = ~0u;
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static uint Calculate(ReadOnlySpan<byte> span)
         {
-            uint crc = ~0u;
-#if NET6_0_OR_GREATER
-            if (Sse42.X64.IsSupported)
+            return Finish(Append(SEED, span));
+        }
+
+        /// <summary>
+        /// Adds bytes to a running CRC32c. Start from <see cref="SEED"/> and pass the result to
+        /// <see cref="Finish"/>. Lets a checksum be taken over a packet in pieces, which is how the
+        /// checksum field is skipped when verifying without copying the packet.
+        /// </summary>
+        /// <remarks>
+        /// BitOperations.Crc32C uses the CPU's CRC instruction on x64 (SSE4.2) and on ARM64, and a
+        /// table otherwise. This used the SSE4.2 intrinsic directly, so ARM devices took the
+        /// byte-at-a-time table for every SCTP packet in both directions.
+        /// </remarks>
+        internal static uint Append(uint crc, ReadOnlySpan<byte> span)
+        {
+            while (span.Length >= 8)
             {
-                int strides = span.Length / 8;
-                int stridedBytes = strides * 8;
-                ReadOnlySpan<ulong> ulongs = MemoryMarshal.Cast<byte, ulong>(span[..stridedBytes]);
-                for (int i = 0; i < strides; i++)
-                {
-                    crc = (uint)Sse42.X64.Crc32(crc, ulongs[i]);
-                }
-                span = span[stridedBytes..];
+                crc = System.Numerics.BitOperations.Crc32C(crc, System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(span));
+                span = span.Slice(8);
             }
-#endif
+
             for (int i = 0; i < span.Length; i++)
             {
-                crc = _table[(crc ^ span[i]) & 0xff] ^ crc >> 8;
+                crc = System.Numerics.BitOperations.Crc32C(crc, span[i]);
             }
-            return crc ^ 0xffffffff;
+
+            return crc;
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static uint Finish(uint crc) => crc ^ 0xffffffff;
     }
 
     /// <summary>
@@ -297,14 +311,20 @@ namespace SIPSorcery.Net
         /// <returns>True if the checksum was valid, false if not.</returns>
         public static bool VerifyChecksum(ReadOnlySpan<byte> bufferRO)
         {
-            uint origChecksum = NetConvert.ParseUInt32(bufferRO, CHECKSUM_BUFFER_POSITION);
-            Span<byte> buffer = stackalloc byte[bufferRO.Length];
-            bufferRO.CopyTo(buffer);
-            NetConvert.ToBuffer(0U, buffer, CHECKSUM_BUFFER_POSITION);
-            uint calcChecksum = CRC32C.Calculate(buffer);
+            if (bufferRO.Length < SctpHeader.SCTP_HEADER_LENGTH)
+            {
+                return false;
+            }
 
-            // Put the original checksum back.
-            NetConvert.ToBuffer(origChecksum, buffer, CHECKSUM_BUFFER_POSITION);
+            uint origChecksum = NetConvert.ParseUInt32(bufferRO, CHECKSUM_BUFFER_POSITION);
+
+            // The checksum is calculated with its own field as zeros. Taken in three pieces (before
+            // the field, four zero bytes, after it) there is no need to copy the packet to blank it.
+            ReadOnlySpan<byte> zeroChecksum = stackalloc byte[4];
+            uint crc = CRC32C.Append(CRC32C.SEED, bufferRO.Slice(0, CHECKSUM_BUFFER_POSITION));
+            crc = CRC32C.Append(crc, zeroChecksum);
+            crc = CRC32C.Append(crc, bufferRO.Slice(CHECKSUM_BUFFER_POSITION + 4));
+            uint calcChecksum = CRC32C.Finish(crc);
 
             return origChecksum == NetConvert.EndianFlip(calcChecksum);
         }

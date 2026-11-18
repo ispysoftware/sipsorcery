@@ -35,6 +35,7 @@
 //-----------------------------------------------------------------------------
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -431,6 +432,21 @@ namespace SIPSorcery.Net
         /// <param name="iceState">The new ICE connection state.</param>
         private async void IceConnectionStateChange(RTCIceConnectionState iceState)
         {
+            // Raised from the ICE channel's timer and receive paths, and it calls the application's
+            // state change handlers. An exception leaving an async void method is rethrown on the
+            // thread pool with nothing to catch it, which ends the process.
+            try
+            {
+                await IceConnectionStateChangeAsync(iceState).ConfigureAwait(false);
+            }
+            catch (Exception excp)
+            {
+                logger.LogError(excp, "Exception handling ICE connection state change to {IceState}. {ErrorMessage}", iceState, excp.Message);
+            }
+        }
+
+        private async Task IceConnectionStateChangeAsync(RTCIceConnectionState iceState)
+        {
             oniceconnectionstatechange?.Invoke(iceConnectionState);
 
             if (iceState == RTCIceConnectionState.connected && _rtpIceChannel.NominatedEntry != null)
@@ -486,6 +502,14 @@ namespace SIPSorcery.Net
                     try
                     {
                         bool handshakeResult = await Task.Run(() => DoDtlsHandshakeAsync(_dtlsHandle)).ConfigureAwait(false);
+
+                        if (!handshakeResult && IsClosed)
+                        {
+                            // A failed handshake closes the connection (as does a close during the
+                            // handshake), and that has already raised closed. Don't follow it with
+                            // failed, leaving that as the final state of a closed connection.
+                            return;
+                        }
 
                         connectionState = (handshakeResult) ? RTCPeerConnectionState.connected : connectionState = RTCPeerConnectionState.failed;
                         onconnectionstatechange?.Invoke(connectionState);
@@ -804,10 +828,21 @@ namespace SIPSorcery.Net
         /// <param name="reason">An optional descriptive reason for the closure.</param>
         public override void Close(string reason)
         {
-            if (!IsClosed)
+            // IsClosed is only set part of the way through (in base.Close), so on its own it let a
+            // second caller in while the first was still tearing down: the application, the ICE
+            // timer and a DTLS close notification on the SCTP receive thread can all get here, and
+            // the teardown and the closed event then ran twice.
+            if (IsClosed || Interlocked.Exchange(ref _closeStarted, 1) != 0)
             {
-                logger.LogDebug($"Peer connection closed with reason {(reason != null ? reason : "<none>")}.");
+                return;
+            }
 
+            logger.LogDebug($"Peer connection closed with reason {(reason != null ? reason : "<none>")}.");
+
+            // Each step is on its own: one that throws must not leave the rest of the connection
+            // (its sockets, timers and threads) open.
+            try
+            {
                 // Close all DataChannels
                 if (DataChannels?.Count > 0)
                 {
@@ -816,17 +851,57 @@ namespace SIPSorcery.Net
                         dc?.close();
                     }
                 }
-
-                _rtpIceChannel?.Close();
-                _dtlsHandle?.Close();
-
-                sctp?.Close();
-                base.Close(reason); // Here Audio and/or Video Streams are closed
-
-                connectionState = RTCPeerConnectionState.closed;
-                onconnectionstatechange?.Invoke(RTCPeerConnectionState.closed);
             }
+            catch (Exception excp)
+            {
+                logger.LogWarning(excp, "Exception closing data channels. {ErrorMessage}", excp.Message);
+            }
+
+            // The transport goes last. It used to be closed first, which threw away everything the
+            // layers above send as they close: the SCTP SHUTDOWN and the DTLS close notification
+            // were dropped at the closed socket, and the remote peer only found out the connection
+            // had gone when its ICE consent checks timed out.
+            try
+            {
+                sctp?.Close();
+            }
+            catch (Exception excp)
+            {
+                logger.LogWarning(excp, "Exception closing SCTP transport. {ErrorMessage}", excp.Message);
+            }
+
+            try
+            {
+                _dtlsHandle?.Close();
+            }
+            catch (Exception excp)
+            {
+                logger.LogWarning(excp, "Exception closing DTLS transport. {ErrorMessage}", excp.Message);
+            }
+
+            try
+            {
+                base.Close(reason); // Here Audio and/or Video Streams are closed
+            }
+            catch (Exception excp)
+            {
+                logger.LogWarning(excp, "Exception closing RTP session. {ErrorMessage}", excp.Message);
+            }
+
+            try
+            {
+                _rtpIceChannel?.Close();
+            }
+            catch (Exception excp)
+            {
+                logger.LogWarning(excp, "Exception closing ICE channel. {ErrorMessage}", excp.Message);
+            }
+
+            connectionState = RTCPeerConnectionState.closed;
+            onconnectionstatechange?.Invoke(RTCPeerConnectionState.closed);
         }
+
+        private int _closeStarted;
 
         /// <summary>
         /// Closes the connection with the default reason.
@@ -1544,6 +1619,29 @@ namespace SIPSorcery.Net
                     OpenDataChannel(dataChannel);
                 }
             }
+            else if (state == RTCSctpTransportState.Closed)
+            {
+                // The association has gone (the remote peer aborted it or shut it down, or it failed).
+                // The data channels are closed with it: they used to stay "open", and the application
+                // carried on sending into them with every message dropped.
+                if (DataChannels?.Count > 0)
+                {
+                    foreach (var dc in DataChannels)
+                    {
+                        if (dc != null && dc.readyState != RTCDataChannelState.closed)
+                        {
+                            try
+                            {
+                                dc.close();
+                            }
+                            catch (Exception excp)
+                            {
+                                logger.LogWarning(excp, "Exception closing data channel after SCTP transport closed. {ErrorMessage}", excp.Message);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -1739,15 +1837,20 @@ namespace SIPSorcery.Net
             }
         }
 
-        private async void SendDtlsPacketAsync(RTPChannel rtpChannel, IPEndPoint destination, byte[] buffer)
+        /// <param name="buffer">Rented from ArrayPool&lt;byte&gt;.Shared; returned here once sent.</param>
+        private async void SendDtlsPacketAsync(RTPChannel rtpChannel, IPEndPoint destination, byte[] buffer, int length)
         {
             try
             {
-                await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, destination, buffer).ConfigureAwait(false);
+                await rtpChannel.SendAsync(RTPChannelSocketsEnum.RTP, destination, new ReadOnlyMemory<byte>(buffer, 0, length)).ConfigureAwait(false);
             }
             catch (Exception excp)
             {
                 logger.LogError($"Exception sending DTLS packet in SendDtlsPacketAsync. {excp}");
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
 
@@ -1766,9 +1869,9 @@ namespace SIPSorcery.Net
             var rtpChannel = PrimaryStream.GetRTPChannel();
 
             // The transport hands over its own copy of each datagram, so it can be sent asynchronously.
-            dtlsHandle.OnDataReady += (buf) =>
+            dtlsHandle.OnDataReady += (buf, length) =>
             {
-                SendDtlsPacketAsync(rtpChannel, PrimaryStream.DestinationEndPoint, buf);
+                SendDtlsPacketAsync(rtpChannel, PrimaryStream.DestinationEndPoint, buf, length);
             };
 
             // DoHandshake blocks its thread until the handshake completes or times out (20 s by default), so it

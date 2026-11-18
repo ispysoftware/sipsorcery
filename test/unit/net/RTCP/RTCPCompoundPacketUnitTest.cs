@@ -134,5 +134,29 @@ namespace SIPSorcery.Net.UnitTests
             Assert.True(RTCPCompoundPacket.TryParse(buffer, null, out int consumed));
             Assert.Equal(buffer.Length, consumed);
         }
+
+        /// <summary>
+        /// A packet type that isn't parsed (APP here, then XR) is stepped over by its header length, so
+        /// the NACK after it is still read. It used to end the parse and lose everything behind it.
+        /// </summary>
+        [Fact]
+        public void UnparsedPacketTypeDoesNotEndCompoundPacket()
+        {
+            var buffer = TypeExtensions.ParseHexStr(
+                "80C9000100000001" +                                                // RR, no reception reports
+                "80CC000211111111" + "74657374" +                                   // APP, 12 bytes, name "test"
+                "80CF000122222222" +                                                // XR, 8 bytes, no report blocks
+                "81CD0003" + "33333333" + "44444444" + "00640003");                 // Generic NACK: seq 100, 101 and 102
+
+            var cp = new RTCPCompoundPacket(buffer);
+
+            Assert.NotNull(cp.ReceiverReport);
+            Assert.Single(cp.NackFeedbacks);
+            Assert.Equal(0x44444444u, cp.NackFeedbacks[0].MediaSSRC);
+            Assert.Equal(new ushort[] { 100, 101, 102 }, cp.NackFeedbacks[0].GetSequenceNumbers().ToArray());
+
+            Assert.True(RTCPCompoundPacket.TryParse(buffer, null, out int consumed));
+            Assert.Equal(buffer.Length, consumed);
+        }
     }
 }

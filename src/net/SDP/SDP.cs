@@ -796,6 +796,13 @@ namespace SIPSorcery.Net
                         }
                     }
 
+                    // Put each announcement's formats back into the order of its m= line, which is the
+                    // sender's order of preference (see SDPMediaAnnouncement.RestoreMediaFormatOrder).
+                    foreach (var media in sdp.Media)
+                    {
+                        media.RestoreMediaFormatOrder();
+                    }
+
                     return sdp;
                 }
                 else

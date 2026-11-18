@@ -90,7 +90,6 @@ namespace SIPSorcery.Net
         private string _associationID;
         private ushort _defaultMTU;
         private uint _initialTSN;
-        private bool _gotFirstSACK;
         private bool _isStarted;
         private Once _closed;
         private Once _resourcesReleased;
@@ -105,10 +104,66 @@ namespace SIPSorcery.Net
         /// congestion window was last increased.
         /// </summary>
         private uint _partialBytesAcked;
-        private OnOff _inRetransmitMode;
         private OnOff _inFastRecoveryMode;
         /// <summary>Only ever accessed inside <see cref="GotSack(SctpChunkView)"/></summary>
         private uint _fastRecoveryExitPoint;
+
+        /// <summary>
+        /// The TSN of the newest DATA chunk put on the wire. Written by the send thread, read when
+        /// a SACK starts fast recovery.
+        /// </summary>
+        private volatile uint _highestSentTSN;
+
+        /// <summary>
+        /// Guards the congestion and retransmission state shared by the send thread (choosing what to
+        /// send) and the thread delivering SACKs. Never held while a chunk is handed to the transport.
+        /// </summary>
+        private readonly Lock _stateLock = new Lock();
+
+        /// <summary>
+        /// User data bytes in flight: sent, not acknowledged and not marked for retransmission by a
+        /// timeout. Written under <see cref="_stateLock"/>.
+        /// </summary>
+        private long _flightBytes;
+
+        /// <summary>User data bytes queued by the application and not yet sent.</summary>
+        private long _bufferedBytes;
+
+        /// <summary>
+        /// The unconfirmed chunks a timeout has marked for retransmission and that have not been resent
+        /// or acknowledged since. Written under <see cref="_stateLock"/>.
+        /// </summary>
+        private int _retransmitPendingCount;
+
+        /// <summary>
+        /// When the T3-rtx timer was last started, as a Stopwatch timestamp. 0 when it is not running.
+        /// Written under <see cref="_stateLock"/>.
+        /// </summary>
+        private long _t3StartedAt;
+
+        /// <summary>
+        /// How many times the RTO has been doubled by a timeout since the last round trip measurement.
+        /// Written under <see cref="_stateLock"/>.
+        /// </summary>
+        private int _rtoBackoffShift;
+
+        /// <summary>More doublings than this can't matter: the RTO is capped at its maximum first.</summary>
+        private const int MAX_RTO_BACKOFF_SHIFT = 16;
+
+        /// <summary>
+        /// The most TSNs walked in order when looking for chunks to retransmit, far more than a
+        /// congestion window can hold.
+        /// </summary>
+        private const uint MAX_RETRANSMIT_SCAN = 1 << 18;
+
+        /// <summary>Acknowledged chunks waiting for the send thread to return them to the pool.</summary>
+        private readonly ConcurrentQueue<SctpDataChunk> _ackedChunks = new ConcurrentQueue<SctpDataChunk>();
+
+        /// <summary>The chunks chosen for the current pass. Send thread only.</summary>
+        private readonly List<SctpDataChunk> _sendBatch = new List<SctpDataChunk>(MAX_BURST);
+
+        private long _lastSendErrorLogAt = -1000;
+
         private ManualResetEventSlim _senderMre = new ManualResetEventSlim();
 
         /// <summary>
@@ -161,10 +216,11 @@ namespace SIPSorcery.Net
         /// <summary>
         /// A count of the bytes currently in-flight to the remote peer.
         /// </summary>
-        internal int _outstandingBytes => _unconfirmedChunks.Sum(x => x.Value.UserDataLength);
+        internal int _outstandingBytes => (int)Math.Max(0L, Volatile.Read(ref _flightBytes));
 
         /// <summary>
-        /// The TSN that the remote peer has acknowledged. Only ever accessed inside <see cref="GotSack(SctpChunkView)"/>
+        /// The TSN that the remote peer has acknowledged. Starts one behind the initial TSN, i.e. nothing
+        /// acknowledged. Accessed under <see cref="_stateLock"/>.
         /// </summary>
         private uint _cumulativeAckTSN;
 
@@ -197,7 +253,7 @@ namespace SIPSorcery.Net
         /// <summary>
         /// The total size (in bytes) of queued user data that will be sent to the peer.
         /// </summary>
-        public ulong BufferedAmount => (ulong)_sendQueue.Sum(x => x.UserDataLength);
+        public ulong BufferedAmount => (ulong)Math.Max(0L, Interlocked.Read(ref _bufferedBytes));
 
         int tsn;
         /// <summary>
@@ -217,6 +273,8 @@ namespace SIPSorcery.Net
             _defaultMTU = defaultMTU > 0 ? defaultMTU : DEFAULT_SCTP_MTU;
             _initialTSN = initialTSN;
             tsn = unchecked((int)initialTSN);
+            _cumulativeAckTSN = unchecked(initialTSN - 1);
+            _highestSentTSN = unchecked(initialTSN - 1);
             _sendQueue = new BlockingCollection<SctpDataChunk>();
 
             // Larger than RFC4960 7.2.1 (point 1) allows, see INITIAL_CONGESTION_WINDOW_MTUS.
@@ -236,13 +294,23 @@ namespace SIPSorcery.Net
         /// </summary>
         /// <param name="sack">The SACK chunk from the remote peer.</param>
         public void GotSack(SctpChunkView sack)
-        {            
-            if (_inRetransmitMode.TryTurnOff())
+        {
+            using (_stateLock.EnterScope())
             {
-                logger.LogDebug("SCTP sender exiting retransmit mode.");
+                ProcessSack(sack);
             }
 
+            // SACK's will normally allow more data to be sent.
+            _senderMre.Set();
+        }
+
+        /// <summary>
+        /// Applies a SACK to the sender state. Must be called with <see cref="_stateLock"/> held.
+        /// </summary>
+        private void ProcessSack(SctpChunkView sack)
+        {
             _bytesAckedBySack = 0;
+            uint cumulativeAckBeforeSack = _cumulativeAckTSN;
 
             unchecked
             {
@@ -259,19 +327,11 @@ namespace SIPSorcery.Net
                     }
                 }
 
-                if (!_gotFirstSACK)
-                {
-                    if (SctpDataReceiver.GetDistance(_initialTSN, sack.CumulativeTsnAck) < maxTSNDistance
-                        && SctpDataReceiver.IsNewerOrEqual(_initialTSN, sack.CumulativeTsnAck))
-                    {
-                        logger.LogTrace("SCTP first SACK remote peer TSN ACK {CumulativeTsnAck} next sender TSN {TSN}, arwnd {ARwnd} (gap reports {NumGapAckBlocks}).",
-                            sack.CumulativeTsnAck, TSN, sack.ARwnd, sack.NumGapAckBlocks);
-                        _gotFirstSACK = true;
-                        _cumulativeAckTSN = _initialTSN;
-                        RemoveAckedUnconfirmedChunks(sack.CumulativeTsnAck);
-                    }
-                }
-                else
+                // The first SACK needs no special case: the cumulative ack starts one behind the initial
+                // TSN. It used to be accepted only if it acknowledged the initial TSN or later, so when
+                // the very first chunk was lost the peer's SACKs (cumulative ack still one behind, gap
+                // reports for what did arrive) were dropped and the gap reports resolved against TSN 0:
+                // no fast retransmit, and the chunk waited out the 3 second initial timeout.
                 {
                     if (_cumulativeAckTSN != sack.CumulativeTsnAck)
                     {
@@ -344,9 +404,16 @@ namespace SIPSorcery.Net
                 _partialBytesAcked = 0;
             }
 
-            // SACK's will normally allow more data to be sent.
-            _senderMre.Set();
-            
+            // RFC4960 6.3.2 R2/R3: stop the retransmission timer when nothing is left unacknowledged,
+            // restart it when the earliest outstanding chunk has been acknowledged.
+            if (_unconfirmedChunks.IsEmpty)
+            {
+                _t3StartedAt = 0;
+            }
+            else if (cumulativeAckBeforeSack != _cumulativeAckTSN)
+            {
+                _t3StartedAt = Stopwatch.GetTimestamp();
+            }
         }
 
         private static readonly ObjectPool<List<SctpDataChunk>> _listPool = new DefaultObjectPool<List<SctpDataChunk>>(
@@ -370,6 +437,7 @@ namespace SIPSorcery.Net
 
             // 1. Get a list from the pool instead of creating a new one.
             List<SctpDataChunk> chunksToQueue = _listPool.Get();
+            bool chunkQueued = false;
             try
             {
                 using (_sendLock.EnterScope())
@@ -426,24 +494,28 @@ namespace SIPSorcery.Net
 
                         Interlocked.Increment(ref tsn);
                     }
-                }
 
-                bool chunkQueued = false;
-                foreach (var chunk in chunksToQueue)
-                {
-                    try
+                    // Queued inside the lock that assigned the TSNs. Queued outside it, two channels
+                    // sending at once could reach the queue out of TSN order; the peer saw that as
+                    // reordering and gap reported chunks that were merely behind in the queue, which
+                    // counted towards a fast retransmit and a cut to the congestion window. The queue has
+                    // no bound, so the add does not block.
+                    foreach (var chunk in chunksToQueue)
                     {
-                        // Add the chunk to the blocking collection. This will block if the queue is full,
-                        // creating backpressure. It will throw an exception if the collection is closed
-                        // or the cancellation token is triggered.
-                        _sendQueue.Add(chunk, _closeCts.Token);
-                        chunkQueued = true;
-                    }
-                    catch (Exception ex) when (ex is InvalidOperationException || ex is OperationCanceledException)
-                    {
-                        logger.LogWarning(ex, "SCTP SendData could not queue chunk for TSN {TSN} as sender is closing.", chunk.TSN);
-                        //chunk.Dispose();
-                        _chunkPool.Return(chunk);
+                        // Counted before it is queued, so the send thread can't take it off first.
+                        Interlocked.Add(ref _bufferedBytes, chunk.UserDataLength);
+                        try
+                        {
+                            // Throws if the collection is closed or the cancellation token is triggered.
+                            _sendQueue.Add(chunk, _closeCts.Token);
+                            chunkQueued = true;
+                        }
+                        catch (Exception ex) when (ex is InvalidOperationException || ex is OperationCanceledException)
+                        {
+                            Interlocked.Add(ref _bufferedBytes, -chunk.UserDataLength);
+                            logger.LogWarning(ex, "SCTP SendData could not queue chunk for TSN {TSN} as sender is closing.", chunk.TSN);
+                            _chunkPool.Return(chunk);
+                        }
                     }
                 }
 
@@ -527,18 +599,28 @@ namespace SIPSorcery.Net
         {
             if (_resourcesReleased.TryMarkOccurred())
             {
-                // Dispose any chunks that have been sent but not yet acknowledged.
-                foreach (var chunk in _unconfirmedChunks.Values)
+                // Under the state lock, and removing each chunk before returning it: a SACK can still be
+                // processed on the receive thread while the sender closes, and it must not hand back a
+                // chunk this loop has already returned (a chunk returned twice ends up shared by two sends).
+                using (_stateLock.EnterScope())
                 {
-                    _chunkPool.Return(chunk);
+                    foreach (var unconfirmedTSN in _unconfirmedChunks.Keys)
+                    {
+                        if (_unconfirmedChunks.TryRemove(unconfirmedTSN, out var unconfirmed))
+                        {
+                            _chunkPool.Return(unconfirmed);
+                        }
+                    }
+
+                    ReleaseAckedChunks();
                 }
-                _unconfirmedChunks.Clear();
 
                 // Drain the send queue and dispose any chunks that were never sent.
                 while (_sendQueue.TryTake(out var chunk))
                 {
                     _chunkPool.Return(chunk);
                 }
+                Interlocked.Exchange(ref _bufferedBytes, 0);
 
                 _sendQueue.Dispose();
                 _closeCts.Dispose();
@@ -569,17 +651,21 @@ namespace SIPSorcery.Net
                 for (int index = 0; index < sackGapBlocks.Length; index += SctpSackChunk.GAP_REPORT_LENGTH)
                 {
                     var block = SctpTsnGapBlock.Read(sackGapBlocks.Slice(index));
-                    for (ushort offset = block.Start; offset <= block.End; offset++)
+                    // int, not ushort: with End = 65535 a ushort counter wraps to 0 and never fails the test,
+                    // which spun the receive thread forever on one SACK from the peer.
+                    // Nothing further ahead than the newest TSN assigned can have been sent, so a block
+                    // claiming more is not walked past that point.
+                    int blockEnd = (int)Math.Min(block.End, maxTSNDistance);
+                    for (int offset = block.Start; offset <= blockEnd; offset++)
                     {
-                        uint goodTSN = _cumulativeAckTSN + offset;
+                        uint goodTSN = _cumulativeAckTSN + (uint)offset;
 
                         _missingChunks.TryRemove(goodTSN, out _);
                         if (_unconfirmedChunks.TryRemove(goodTSN, out var chunk))
                         {
                             logger.LogTrace("SCTP acknowledged data chunk receipt in gap report for TSN {TSN}", goodTSN);
                             highestTsnNewlyAcknowledged = goodTSN;
-                            //chunk.Dispose();
-                            _chunkPool.Return(chunk);
+                            OnChunkAcked(chunk);
                         }
                     }
                 }
@@ -638,11 +724,18 @@ namespace SIPSorcery.Net
                                 // rfc 7.2.4: When the third consecutive miss indication is received for a TSN(s), the data sender shall do the following...
                                 if (missCount + 1 == 3)
                                 {
-                                    if (_inFastRecoveryMode.TryTurnOn()) // RFC4960 7.2.4 (2)
+                                    // Not while a timeout's retransmissions are still going out: the window
+                                    // was collapsed to one MTU for this loss, and the formula below would
+                                    // raise it to four.
+                                    if (_retransmitPendingCount == 0 && _inFastRecoveryMode.TryTurnOn()) // RFC4960 7.2.4 (2)
                                     {
-                                        // mark the highest outstanding TSN as the Fast Recovery exit point
-                                        var last = SctpTsnGapBlock.Read(sackGapBlocks.Slice(sackGapBlocks.Length - SctpSackChunk.GAP_REPORT_LENGTH));
-                                        _fastRecoveryExitPoint = _cumulativeAckTSN + last.End;
+                                        // Mark the highest outstanding TSN as the Fast Recovery exit point: the last
+                                        // chunk put on the wire, not the last one this SACK happens to gap-ack. Using
+                                        // the gap-ack ended recovery early, so a second loss in the same window started
+                                        // another recovery and halved cwnd again (RFC4960 7.2.4 allows one cut a window).
+                                        // Not TSN - 1: TSNs are assigned when data is queued, and with megabytes waiting
+                                        // unsent that point is not reached until the whole queue has been acknowledged.
+                                        _fastRecoveryExitPoint = _highestSentTSN;
 
                                         logger.LogDebug($"SCTP sender entering fast recovery mode due to missing TSN {missingTSN}. Fast recovery exit point {_fastRecoveryExitPoint}.");
                                         // RFC4960 7.2.3
@@ -698,8 +791,7 @@ namespace SIPSorcery.Net
             if (_unconfirmedChunks.TryRemove(tsn, out var chunk))
             {
                 _bytesAckedBySack += (uint)chunk.UserDataLength;
-                //chunk.Dispose();
-                _chunkPool.Return(chunk);
+                OnChunkAcked(chunk);
             }
         }
 
@@ -721,119 +813,21 @@ namespace SIPSorcery.Net
                     break;
                 }
 
-                var outstandingBytes = (uint)_outstandingBytes;
-                // DateTime.Now calls have been a tiny bit expensive in the past so get a small saving by only
-                // calling once per loop.
-                var now = SctpDataChunk.Timestamp.Now;
+                // Nothing on this thread holds a chunk reference here, so the chunks SACKs have acknowledged
+                // since the last pass can go back to the pool.
+                ReleaseAckedChunks();
 
-                int burstSize = (_inRetransmitMode.IsOn() || _inFastRecoveryMode.IsOn() || _congestionWindow < outstandingBytes || _receiverWindow == 0) ? 1 : MAX_BURST;
-                int chunksSent = 0;
-
-                //logger.LogTrace($"SCTP sender burst size {burstSize}, in retransmit mode {_inRetransmitMode}, cwnd {_congestionWindow}, arwnd {_receiverWindow}.");
-
-                // Missing chunks from a SACK gap report take priority.
-                if (!_missingChunks.IsEmpty)
+                // The chunks to send are chosen with the sender state locked, then put on the wire with it
+                // released: the transport must never be called under the lock the SACK handler takes.
+                _sendBatch.Clear();
+                using (_stateLock.EnterScope())
                 {
-                    foreach (var missing in _missingChunks)
-                    {
-                        if (missing.Value >= 3)  // RFC4960 7.2.4 Fast retransmission
-                        {
-                            if (_unconfirmedChunks.TryGetValue(missing.Key, out var missingChunk))
-                            {
-                                missingChunk.LastSentAt = now;
-                                missingChunk.SendCount += 1;
-
-                                logger.LogTrace("SCTP resending missing data chunk for TSN {TSN}, data length {Length}, " +
-                                    "flags {Flags:X2}, send count {Count}.",
-                                    missingChunk.TSN, missingChunk.UserDataLength, missingChunk.ChunkFlags, missingChunk.SendCount);
-
-                                _sendDataChunk(missingChunk);
-                                chunksSent++;
-                                _missingChunks.TryUpdate(missing.Key, 0, missing.Value);
-                            }
-                        }
-                        if (chunksSent >= burstSize)
-                        {
-                            break;
-                        }
-                    }
+                    SelectChunksToSend(_sendBatch);
                 }
 
-                // Check if there are any unconfirmed transactions that are due for a retransmit.
-                if (chunksSent < burstSize && !_unconfirmedChunks.IsEmpty)
-                {
-                    int taken = 0, send = burstSize - chunksSent;
-                    foreach (var entry in _unconfirmedChunks)
-                    {
-                        var chunk = entry.Value;
-                        if ((now - chunk.LastSentAt).TotalMilliseconds <= (_hasRoundTripTime ? _rto : _rtoInitialMilliseconds))
-                        {
-                            continue;
-                        }
-                        if (taken >= send)
-                        {
-                            break;
-                        }
-                        taken++;
+                SendBatch(_sendBatch);
 
-                        chunk.LastSentAt = SctpDataChunk.Timestamp.Now;
-                        chunk.SendCount += 1;
-
-                        logger.LogTrace("SCTP retransmitting data chunk for TSN {TSN}, data length {Length}, " +
-                            "flags {Flags:X2}, send count {Count}.",
-                            chunk.TSN, chunk.UserDataLength, chunk.ChunkFlags, chunk.SendCount);
-
-                        _sendDataChunk(chunk);
-                        chunksSent++;
-
-                        if (_inRetransmitMode.TryTurnOn())
-                        {
-                            logger.LogDebug("SCTP sender entering retransmit mode.");
-
-                            // When the T3-rtx timer expires on an address, SCTP should perform slow start.
-                            // RFC4960 7.2.3
-                            _slowStartThreshold = (uint)Math.Max(_congestionWindow / 2, 4 * _defaultMTU);
-                            // did not clarify, but I believe entering retransmit mode is NOT the same
-                            // as T3-rtx timer expiring. Will just use regular halving formula here.
-                            _congestionWindow = _slowStartThreshold;
-                            _partialBytesAcked = 0;
-
-                            // For the destination address for which the timer expires, set RTO <- RTO * 2("back off the timer")
-                            // RFC4960 6.3.3 E2
-                            if (_hasRoundTripTime)
-                            {
-                                _rto = Math.Min(_rtoMaximumMilliseconds, _rto * 2);
-                            }
-                        }
-                    }
-                }
-                // rfc4960 6.1: At any given time, the sender MUST NOT transmit new data to a given transport address
-                // if it has cwnd or more bytes of data outstanding to that transport address.
-
-                // Send any new data chunks that have not yet been sent.
-                if (chunksSent < burstSize && _sendQueue.Count > 0 && _congestionWindow > outstandingBytes)
-                {
-                    while (chunksSent < burstSize && _sendQueue.TryTake(out var dataChunk))
-                    {
-                        dataChunk.LastSentAt = SctpDataChunk.Timestamp.Now;
-                        dataChunk.SendCount = 1;
-
-                        logger.LogTrace("SCTP sending data chunk for TSN {TSN}, data length {Length}, " +
-                            "flags {Flags:X2}, send count {Count}.",
-                            dataChunk.TSN, dataChunk.UserDataLength, dataChunk.ChunkFlags, dataChunk.SendCount);
-
-                        if (_unconfirmedChunks.TryAdd(dataChunk.TSN, dataChunk))
-                        {
-                            _sendDataChunk(dataChunk);
-                            chunksSent++;
-                        }
-                        else
-                        {
-                            logger.LogDebug("SCTP duplicate TSN {TSN} detected in send queue.", dataChunk.TSN);
-                        }
-                    }
-                }
-
+  
                 int wait = GetSendWaitMilliseconds();
                 _senderMre.Wait(wait);
             }
@@ -848,24 +842,313 @@ namespace SIPSorcery.Net
         /// </summary>
         private int GetSendWaitMilliseconds()
         {
-            if (_sendQueue.Count > 0 || !_missingChunks.IsEmpty)
+            int wait;
+
+            if (_sendQueue.Count > 0 || !_missingChunks.IsEmpty || Volatile.Read(ref _retransmitPendingCount) > 0)
             {
                 if (_receiverWindow > 0 && _congestionWindow > (uint)_outstandingBytes)
                 {
-                    return _burstPeriodMilliseconds;
+                    wait = _burstPeriodMilliseconds;
                 }
                 else
                 {
-                    return _rtoMinimumMilliseconds;
+                    wait = _rtoMinimumMilliseconds;
                 }
-            }
-            else if (!_unconfirmedChunks.IsEmpty)
-            {
-                return (int)(_hasRoundTripTime ? _rto : _rtoInitialMilliseconds);
             }
             else
             {
-                return _rtoInitialMilliseconds;
+                wait = _rtoInitialMilliseconds;
+            }
+
+            // Never sleep past the retransmission timer: a SACK or new data wakes the thread early, but
+            // a timeout has nothing else to wake it.
+            long t3StartedAt = Volatile.Read(ref _t3StartedAt);
+            if (t3StartedAt != 0)
+            {
+                double remaining = CurrentRtoMilliseconds() - Stopwatch.GetElapsedTime(t3StartedAt).TotalMilliseconds;
+                int untilTimeout = remaining <= 1 ? 1 : (int)Math.Min(remaining, int.MaxValue);
+                wait = Math.Min(wait, untilTimeout);
+            }
+
+            return wait;
+        }
+
+        /// <summary>
+        /// The retransmission timeout in force: the measured (or initial) RTO, doubled for each
+        /// timeout since the last round trip measurement (RFC4960 6.3.3 E2) and capped at the maximum.
+        /// </summary>
+        private double CurrentRtoMilliseconds()
+        {
+            double rto = _hasRoundTripTime ? _rto : _rtoInitialMilliseconds;
+            int shift = Volatile.Read(ref _rtoBackoffShift);
+            return shift > 0 ? Math.Min(_rtoMaximumMilliseconds, rto * (1L << shift)) : rto;
+        }
+
+        /// <summary>
+        /// Chooses the chunks for this pass of the send thread, in priority order: fast retransmits,
+        /// chunks a timeout marked for retransmission, then new data. Must be called with
+        /// <see cref="_stateLock"/> held. The chunks are sent by the caller once the lock is released.
+        /// </summary>
+        private void SelectChunksToSend(List<SctpDataChunk> batch)
+        {
+            var now = SctpDataChunk.Timestamp.Now;
+
+            // T3-rtx. One timer for the association, running while anything is unacknowledged and
+            // restarted when a SACK moves the cumulative ack on (RFC4960 6.3.2). Each chunk used to carry
+            // its own timer: when a whole flight was lost, the first timeout resent a few chunks, doubled
+            // the RTO and so pushed the rest of that same flight out by another timeout, and every round
+            // after that halved the window and doubled the RTO again. Losing 100 chunks took minutes.
+            if (_unconfirmedChunks.IsEmpty)
+            {
+                _t3StartedAt = 0;
+            }
+            else if (_t3StartedAt == 0)
+            {
+                _t3StartedAt = now.Ticks;
+            }
+            else if (Stopwatch.GetElapsedTime(_t3StartedAt, now.Ticks).TotalMilliseconds >= CurrentRtoMilliseconds())
+            {
+                OnRetransmissionTimeout(now);
+            }
+
+            uint flightAtStart = (uint)Math.Max(0L, _flightBytes);
+            int burstSize = (_inFastRecoveryMode.IsOn() || _congestionWindow < flightAtStart || _receiverWindow == 0) ? 1 : MAX_BURST;
+
+            // Missing chunks from a SACK gap report take priority. RFC4960 7.2.4 fast retransmission,
+            // sent whatever the congestion window.
+            if (!_missingChunks.IsEmpty)
+            {
+                foreach (var missing in _missingChunks)
+                {
+                    if (missing.Value >= 3 && _unconfirmedChunks.TryGetValue(missing.Key, out var missingChunk))
+                    {
+                        AddRetransmit(batch, missingChunk, now);
+                        _missingChunks.TryUpdate(missing.Key, 0, missing.Value);
+                    }
+                    if (batch.Count >= burstSize)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            // Chunks marked by a timeout, lowest TSN first (the one holding back the peer's cumulative
+            // ack) and only as the congestion window allows: it restarts at one MTU and each SACK for a
+            // resent chunk opens it further, so the lost flight goes back out in slow start rather than
+            // a few chunks per timeout.
+            if (_retransmitPendingCount > 0)
+            {
+                uint first = unchecked(_cumulativeAckTSN + 1);
+                uint last = _highestSentTSN;
+                uint span = SctpDataReceiver.IsNewerOrEqual(first, last) ? unchecked(last - first + 1) : 0;
+                bool found = false;
+
+                for (uint offset = 0; offset < span && offset < MAX_RETRANSMIT_SCAN; offset++)
+                {
+                    if (batch.Count >= MAX_BURST || _retransmitPendingCount == 0 || _flightBytes >= _congestionWindow)
+                    {
+                        found = true; // Stopped by a limit, not by running out of chunks.
+                        break;
+                    }
+
+                    if (_unconfirmedChunks.TryGetValue(unchecked(first + offset), out var chunk) && chunk.RetransmitPending)
+                    {
+                        AddRetransmit(batch, chunk, now);
+                        found = true;
+                    }
+                }
+
+                if (!found)
+                {
+                    // Nothing pending in the TSN range walked (it is only that large if the peer has
+                    // acknowledged TSNs out of all proportion). Fall back to whatever order the dictionary
+                    // gives, and if it holds no marked chunk either the count is stale.
+                    foreach (var entry in _unconfirmedChunks)
+                    {
+                        if (batch.Count >= MAX_BURST || _flightBytes >= _congestionWindow)
+                        {
+                            found = true;
+                            break;
+                        }
+                        if (entry.Value.RetransmitPending)
+                        {
+                            AddRetransmit(batch, entry.Value, now);
+                            found = true;
+                        }
+                    }
+
+                    if (!found)
+                    {
+                        _retransmitPendingCount = 0;
+                    }
+                }
+            }
+
+            // rfc4960 6.1: At any given time, the sender MUST NOT transmit new data to a given transport address
+            // if it has cwnd or more bytes of data outstanding to that transport address.
+            // New data waits until everything a timeout marked has been resent. The window is tested once
+            // for the pass, as it always has been, so a burst can run a few chunks over it.
+            if (_retransmitPendingCount == 0 && batch.Count < burstSize && _sendQueue.Count > 0 && _congestionWindow > flightAtStart)
+            {
+                while (batch.Count < burstSize && _sendQueue.TryTake(out var dataChunk))
+                {
+                    Interlocked.Add(ref _bufferedBytes, -dataChunk.UserDataLength);
+
+                    dataChunk.LastSentAt = now;
+                    dataChunk.SendCount = 1;
+                    dataChunk.RetransmitPending = false;
+
+                    if (_unconfirmedChunks.TryAdd(dataChunk.TSN, dataChunk))
+                    {
+                        _flightBytes += dataChunk.UserDataLength;
+                        if (SctpDataReceiver.IsNewer(_highestSentTSN, dataChunk.TSN))
+                        {
+                            _highestSentTSN = dataChunk.TSN;
+                        }
+                        batch.Add(dataChunk);
+                    }
+                    else
+                    {
+                        logger.LogDebug("SCTP duplicate TSN {TSN} detected in send queue.", dataChunk.TSN);
+                        _chunkPool.Return(dataChunk);
+                    }
+                }
+            }
+
+            if (batch.Count > 0 && _t3StartedAt == 0)
+            {
+                // RFC4960 6.3.2 R1: start the timer when data is sent and it isn't running.
+                _t3StartedAt = now.Ticks;
+            }
+        }
+
+        /// <summary>
+        /// Adds a chunk that has been sent before to the batch. Must be called with <see cref="_stateLock"/> held.
+        /// </summary>
+        private void AddRetransmit(List<SctpDataChunk> batch, SctpDataChunk chunk, SctpDataChunk.Timestamp now)
+        {
+            if (chunk.RetransmitPending)
+            {
+                // Back in flight.
+                chunk.RetransmitPending = false;
+                _retransmitPendingCount--;
+                _flightBytes += chunk.UserDataLength;
+            }
+
+            chunk.LastSentAt = now;
+            chunk.SendCount += 1;
+
+            logger.LogTrace("SCTP retransmitting data chunk for TSN {TSN}, data length {Length}, " +
+                "flags {Flags:X2}, send count {Count}.",
+                chunk.TSN, chunk.UserDataLength, chunk.ChunkFlags, chunk.SendCount);
+
+            batch.Add(chunk);
+        }
+
+        /// <summary>
+        /// The T3-rtx timer has expired (RFC4960 6.3.3): back the timer off, restart the congestion
+        /// window in slow start, and mark everything outstanding for retransmission. Marked chunks no
+        /// longer count as in flight until they are resent. Must be called with <see cref="_stateLock"/> held.
+        /// </summary>
+        private void OnRetransmissionTimeout(SctpDataChunk.Timestamp now)
+        {
+            // RFC4960 7.2.3.
+            _slowStartThreshold = (uint)Math.Max(_congestionWindow / 2, 4 * _defaultMTU);
+            _congestionWindow = _defaultMTU;
+            _partialBytesAcked = 0;
+
+            // RFC4960 6.3.3 E2. Undone by the next round trip measurement.
+            if (_rtoBackoffShift < MAX_RTO_BACKOFF_SHIFT)
+            {
+                _rtoBackoffShift++;
+            }
+
+            // The window has been cut for this loss already, and every chunk the gap reports were
+            // counting is about to be resent anyway.
+            _inFastRecoveryMode.TryTurnOff();
+            _missingChunks.Clear();
+
+            int marked = 0;
+            foreach (var entry in _unconfirmedChunks)
+            {
+                var chunk = entry.Value;
+                if (!chunk.RetransmitPending)
+                {
+                    chunk.RetransmitPending = true;
+                    _retransmitPendingCount++;
+                    _flightBytes -= chunk.UserDataLength;
+                    marked++;
+                }
+            }
+
+            // E3: restart the timer for the chunk(s) about to be resent.
+            _t3StartedAt = now.Ticks;
+
+            logger.LogDebug("SCTP sender retransmission timeout for association {ID}: {Marked} chunk(s) marked for retransmission, " +
+                "next timeout in {RTO}ms.", _associationID, marked, CurrentRtoMilliseconds());
+        }
+
+        /// <summary>
+        /// Puts the chosen chunks on the wire. Called by the send thread without <see cref="_stateLock"/>.
+        /// </summary>
+        private void SendBatch(List<SctpDataChunk> batch)
+        {
+            for (int i = 0; i < batch.Count; i++)
+            {
+                try
+                {
+                    _sendDataChunk(batch[i]);
+                }
+                catch (Exception excp)
+                {
+                    // An exception leaving this thread would take the process down. The chunks stay
+                    // unacknowledged, so the timeout resends them if the transport recovers.
+                    if (!_closed.HasOccurred)
+                    {
+                        long nowMs = Environment.TickCount64;
+                        if (nowMs - _lastSendErrorLogAt >= 1000)
+                        {
+                            _lastSendErrorLogAt = nowMs;
+                            logger.LogWarning(excp, "SCTP sender for association {ID} could not send a data chunk.", _associationID);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// A SACK has acknowledged a sent chunk that was just removed from the unconfirmed chunks.
+        /// Must be called with <see cref="_stateLock"/> held.
+        /// </summary>
+        private void OnChunkAcked(SctpDataChunk chunk)
+        {
+            if (chunk.RetransmitPending)
+            {
+                // Marked by a timeout and acknowledged before it was resent: it was not counted as in flight.
+                chunk.RetransmitPending = false;
+                _retransmitPendingCount--;
+            }
+            else
+            {
+                _flightBytes -= chunk.UserDataLength;
+            }
+
+            // Not returned to the pool here. The send thread may be in the middle of sending this very
+            // chunk, and the pool is shared by every association: returned now, the chunk and its buffer
+            // could be handed to another connection's send while this one is still being serialised.
+            // The send thread returns it once it holds no chunk references (ReleaseAckedChunks).
+            _ackedChunks.Enqueue(chunk);
+        }
+
+        /// <summary>
+        /// Returns the chunks acknowledged since the last pass to the pool. Send thread only.
+        /// </summary>
+        private void ReleaseAckedChunks()
+        {
+            while (_ackedChunks.TryDequeue(out var chunk))
+            {
+                _chunkPool.Return(chunk);
             }
         }
 
@@ -903,6 +1186,9 @@ namespace SIPSorcery.Net
 
             // rfc 4960 6.3.1 C6-7
             _rto = Math.Min(Math.Max(_rto, _rtoMinimumMilliseconds), _rtoMaximumMilliseconds);
+
+            // A fresh measurement replaces any backed off RTO.
+            _rtoBackoffShift = 0;
         }
 
         /// <summary>

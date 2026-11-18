@@ -16,6 +16,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -295,6 +296,68 @@ namespace SIPSorcery.Net.UnitTests
             Assert.False(frame.IsEmpty());
             Assert.Equal(buffer.Length, frame.UserData.Length);
             Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData.ToArray()));
+        }
+
+        /// <summary>
+        /// Tests recovery when every first transmission is lost, so nothing is ever acknowledged until
+        /// the retransmission timer fires: the whole flight must be resent lowest TSN first, and the
+        /// sender's byte counters must come back to zero once everything has been acknowledged.
+        /// </summary>
+        [Fact]
+        public void WholeFlightLostIsRecoveredInTsnOrder()
+        {
+            ushort mtu = 1400;
+            uint arwnd = SctpAssociation.DEFAULT_ADVERTISED_RECEIVE_WINDOW;
+            SctpDataReceiver receiver = new SctpDataReceiver(arwnd, mtu, 0);
+            SctpDataSender sender = new SctpDataSender("dummy", null, mtu, 0, arwnd);
+            sender._burstPeriodMilliseconds = 1;
+            sender._rtoInitialMilliseconds = 100;
+            sender._rtoMinimumMilliseconds = 100;
+
+            SctpDataFrame frame = SctpDataFrame.Empty;
+            ManualResetEventSlim frameReady = new ManualResetEventSlim(false);
+            List<uint> retransmitted = new List<uint>();
+
+            Action<SctpDataChunk> doSend = (chunk) =>
+            {
+                if (chunk.SendCount == 1)
+                {
+                    logger.LogDebug("Data chunk {TSN} dropped.", chunk.TSN);
+                    return;
+                }
+
+                retransmitted.Add(chunk.TSN);
+
+                var frames = receiver.OnDataChunk(chunk);
+                sender.GotSack(receiver.GetSackChunk());
+
+                if (frames.Count > 0)
+                {
+                    frame = frames.First();
+                    frameReady.Set();
+                }
+            };
+            sender._sendDataChunk = doSend;
+            sender.StartSending();
+
+            byte[] buffer = new byte[20 * mtu];
+            Crypto.GetRandomBytes(buffer);
+            string hash = Crypto.GetSHA256Hash(buffer);
+
+            sender.SendData(0, 0, buffer);
+
+            frameReady.WaitHandle.WaitOne(10000, true);
+
+            Assert.False(frame.IsEmpty());
+            Assert.Equal(buffer.Length, frame.UserData.Length);
+            Assert.Equal(hash, Crypto.GetSHA256Hash(frame.UserData.ToArray()));
+
+            // Each chunk was resent exactly once, in TSN order.
+            Assert.Equal(Enumerable.Range(0, 20).Select(x => (uint)x), retransmitted);
+
+            // Nothing left in flight or waiting to be sent.
+            Assert.Equal(0, sender._outstandingBytes);
+            Assert.Equal(0UL, sender.BufferedAmount);
         }
 
         /// <summary>

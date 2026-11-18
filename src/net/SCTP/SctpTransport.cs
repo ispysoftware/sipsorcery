@@ -141,6 +141,42 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
+        /// Sends a packet carrying a single chunk, serialised straight into a stack buffer. Nearly every
+        /// packet an association sends is one chunk (a DATA chunk or a SACK), and each used to be wrapped
+        /// in a new packet object with a list for its one chunk.
+        /// </summary>
+        internal void Send(string ID, ushort sourcePort, ushort destinationPort, uint verificationTag, SctpChunk chunk)
+        {
+            const int STACK_LIMIT = 4 * 1024;
+
+            int size = SctpHeader.SCTP_HEADER_LENGTH + chunk.GetChunkLength(true);
+            if (size > STACK_LIMIT)
+            {
+                var pkt = new SctpPacket(sourcePort, destinationPort, verificationTag);
+                pkt.AddChunk(chunk);
+                Send(ID, pkt);
+                return;
+            }
+
+            Span<byte> span = stackalloc byte[size];
+
+            new SctpHeader
+            {
+                SourcePort = sourcePort,
+                DestinationPort = destinationPort,
+                VerificationTag = verificationTag
+            }.WriteToBuffer(span);
+
+            chunk.WriteTo(span, SctpHeader.SCTP_HEADER_LENGTH);
+
+            NetConvert.ToBuffer(0U, span, SctpPacket.CHECKSUM_BUFFER_POSITION);
+            uint checksum = CRC32C.Calculate(span);
+            NetConvert.ToBuffer(NetConvert.EndianFlip(checksum), span, SctpPacket.CHECKSUM_BUFFER_POSITION);
+
+            Send(ID, span);
+        }
+
+        /// <summary>
         /// Sends an SCTP packet to the remote peer.
         /// </summary>
         /// <param name="pkt">The packet to send.</param>

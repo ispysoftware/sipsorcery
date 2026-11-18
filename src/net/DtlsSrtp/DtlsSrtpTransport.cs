@@ -32,7 +32,12 @@ using SIPSorcery.Net.SharpSRTP.SRTP;
 
 namespace SIPSorcery.Net
 {
-    public delegate void OnDataReadyEvent(byte[] data);
+    /// <summary>
+    /// A DTLS datagram is ready to go on the wire: the first <paramref name="length"/> bytes of
+    /// <paramref name="data"/>. The array is rented from ArrayPool&lt;byte&gt;.Shared and is the
+    /// handler's to return once it has sent it. There must be exactly one handler.
+    /// </summary>
+    public delegate void OnDataReadyEvent(byte[] data, int length);
     public delegate void OnDtlsAlertEvent(TlsAlertLevelsEnum alertLevel, TlsAlertTypesEnum alertType, string alertDescription);
 
     public class DtlsSrtpTransport : DatagramTransport, IDisposable
@@ -201,8 +206,7 @@ namespace SIPSorcery.Net
 
         public void Send(byte[] buf, int off, int len)
         {
-            // Always hand an owned copy to OnDataReady: the send is asynchronous and BouncyCastle may reuse its buffer.
-            OnDataReady?.Invoke(buf.AsSpan(off, len).ToArray());
+            Send(buf.AsSpan(off, len));
         }
 
         [System.Diagnostics.DebuggerNonUserCode]
@@ -232,7 +236,18 @@ namespace SIPSorcery.Net
 
         public void Send(ReadOnlySpan<byte> buffer)
         {
-            OnDataReady?.Invoke(buffer.ToArray());
+            var handler = OnDataReady;
+            if (handler == null)
+            {
+                return;
+            }
+
+            // The handler gets its own copy: the send is asynchronous and BouncyCastle reuses its
+            // buffer. The copy is pooled and the handler returns it (see OnDataReadyEvent). It was a
+            // new array for every DTLS record, which is every SCTP packet a data channel sends.
+            byte[] copy = ArrayPool<byte>.Shared.Rent(buffer.Length);
+            buffer.CopyTo(copy);
+            handler(copy, buffer.Length);
         }
     }
 }

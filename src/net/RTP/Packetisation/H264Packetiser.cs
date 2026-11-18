@@ -93,6 +93,72 @@ namespace SIPSorcery.Net
             return ranges;
         }
 
+        /// <summary>
+        /// Finds the next NAL in an Annex B access unit without allocating: the send path's form of
+        /// <see cref="ParseNals"/>, which builds an iterator and a list for every frame. Start
+        /// <paramref name="position"/> at 0 and pass it back unchanged for each following call. Gives
+        /// the same NALs as <see cref="ParseNals"/>.
+        /// </summary>
+        /// <param name="accessUnit">The access unit, NALs separated by 3 or 4 byte start codes.</param>
+        /// <param name="position">Where to resume the search. Updated to just past the NAL returned.</param>
+        /// <param name="start">The offset of the NAL in the access unit.</param>
+        /// <param name="length">The length of the NAL.</param>
+        /// <returns>False when there are no more NALs.</returns>
+        public static bool TryNextNal(ReadOnlySpan<byte> accessUnit, ref int position, out int start, out int length)
+        {
+            while (position < accessUnit.Length)
+            {
+                int nalStart = position;
+                int nalEnd = accessUnit.Length; // exclusive
+                int next = accessUnit.Length;
+
+                // A start code ends in 0x01, so hop from one 0x01 to the next (a vectorised search)
+                // and look behind it for the zeros.
+                int search = nalStart;
+                while (search < accessUnit.Length)
+                {
+                    int relative = accessUnit.Slice(search).IndexOf((byte)0x01);
+                    if (relative < 0)
+                    {
+                        break;
+                    }
+
+                    int one = search + relative;
+
+                    // Zeros directly before it, counted no further back than this NAL's start and
+                    // no further than it takes to tell a 3 byte start code from a longer one.
+                    int zeroes = 0;
+                    while (zeroes < 3 && one - 1 - zeroes >= nalStart && accessUnit[one - 1 - zeroes] == 0x00)
+                    {
+                        zeroes++;
+                    }
+
+                    if (zeroes >= 2)
+                    {
+                        int startCodeLength = (zeroes == 2) ? 3 : 4;
+                        nalEnd = one - startCodeLength + 1;
+                        next = one + 1;
+                        break;
+                    }
+
+                    search = one + 1;
+                }
+
+                position = next;
+
+                if (nalEnd > nalStart)
+                {
+                    start = nalStart;
+                    length = nalEnd - nalStart;
+                    return true;
+                }
+            }
+
+            start = 0;
+            length = 0;
+            return false;
+        }
+
         public static byte[] GetH264RtpHeader(byte nal0, bool isFirstPacket, bool isFinalPacket)
         {
             byte nalType = (byte)(nal0 & 0x1F);

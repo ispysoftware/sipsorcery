@@ -33,53 +33,81 @@ namespace SIPSorcery.Net
     /// which is per-stream rather than truly transport-wide).
     /// </summary>
     /// <remarks>
-    /// One slot per 16-bit TWCC seqnum. New writes overwrite the slot at the same
-    /// seqnum, so old entries are recycled automatically when seqnums wrap. No
-    /// background cleanup needed.
+    /// A ring of the most recent <see cref="WINDOW"/> seqnums, indexed by the low bits of the
+    /// seqnum. Each slot remembers which seqnum it holds, so a lookup for a seqnum that has since
+    /// been overwritten (more than a window old) misses rather than returning another packet's
+    /// time. No background cleanup needed.
     ///
-    /// Lookup-time staleness checking is the CALLER'S responsibility — typically
-    /// the bandwidth estimator discards entries older than the TWCC feedback
-    /// window (~1 second). Stale entries from a previous seqnum wrap will return
-    /// `true` with a timestamp from minutes ago; the caller should compare against
-    /// "now" and reject anything implausibly old.
+    /// The caller should still reject an implausibly old timestamp: on a stream that has stopped
+    /// sending, a slot keeps its last entry until the seqnums come round to it again.
     /// </remarks>
     public sealed class TwccSentPacketTracker
     {
-        // Flat array indexed by seqnum (512 KB, one allocation per stream). Replaced a
-        // ConcurrentDictionary<ushort,long> that allocated a node per seqnum until all 65536
-        // existed (~1 minute of video), then held those ~3 MB of small objects in Gen2 for the
-        // life of every peer connection - GC mark work for a lookup table - and hashed + locked
-        // on every packet. 0 marks an empty slot: Stopwatch timestamps are never 0 in practice.
-        // Volatile read/write keeps each long atomic on 32-bit ARM too.
-        private readonly long[] _sendTimes = new long[ushort.MaxValue + 1];
+        // 8192 seqnums is 16 seconds of video at 500 packets a second; feedback arrives within a
+        // second or so of the send. Was one slot per 16-bit seqnum: a 512 KB array on the large
+        // object heap for every stream of every peer connection, the audio stream's never written
+        // to. The two arrays here are 64 KB and 16 KB, under the large object threshold, and are
+        // not allocated until the stream sends its first TWCC-tagged packet.
+        private const int WINDOW = 8192; // power of two
+        private const int WINDOW_MASK = WINDOW - 1;
+
+        // 0 in _sendTimes marks an empty slot: Stopwatch timestamps are never 0 in practice.
+        private long[] _sendTimes;
+        private ushort[] _seqnums;
         private int _count;
 
         /// <summary>
         /// Record the wire-send time for an outgoing TWCC seqnum. Call this from
         /// the RTP send path immediately after stamping the packet with its seqnum.
+        /// Calls must not overlap (the send path makes them under the stream's send lock).
         /// </summary>
         /// <param name="sequenceNumber">TWCC sequence number stamped on the packet.</param>
         /// <param name="sendTimeTicks">Monotonic timestamp, typically Stopwatch.GetTimestamp().</param>
         public void RecordSend(ushort sequenceNumber, long sendTimeTicks)
         {
-            ref long slot = ref _sendTimes[sequenceNumber];
-            if (Volatile.Read(ref slot) == 0)
+            var sendTimes = _sendTimes;
+            if (sendTimes == null)
+            {
+                // The seqnum array first: a reader takes _sendTimes being set to mean both are there.
+                Volatile.Write(ref _seqnums, new ushort[WINDOW]);
+                sendTimes = new long[WINDOW];
+                Volatile.Write(ref _sendTimes, sendTimes);
+            }
+
+            int index = sequenceNumber & WINDOW_MASK;
+            if (Volatile.Read(ref sendTimes[index]) == 0)
             {
                 Interlocked.Increment(ref _count);
             }
-            Volatile.Write(ref slot, sendTimeTicks);
+
+            // Seqnum before time, and the reader takes them in the opposite order: it can then never
+            // pair this packet's time with the seqnum the slot held before.
+            Volatile.Write(ref _seqnums[index], sequenceNumber);
+            Volatile.Write(ref sendTimes[index], sendTimeTicks);
         }
 
         /// <summary>
         /// Look up the previously-recorded send time for a seqnum.
         /// </summary>
         /// <param name="sendTimeTicks">Send time in Stopwatch ticks if found, 0 otherwise.</param>
-        /// <returns>True if a send time was recorded for this seqnum (caller should still
-        /// validate the timestamp isn't from a stale pre-wrap entry).</returns>
+        /// <returns>True if a send time is held for this seqnum (the caller should still
+        /// reject a timestamp that is implausibly old).</returns>
         public bool TryGetSendTime(ushort sequenceNumber, out long sendTimeTicks)
         {
-            sendTimeTicks = Volatile.Read(ref _sendTimes[sequenceNumber]);
-            return sendTimeTicks != 0;
+            var sendTimes = Volatile.Read(ref _sendTimes);
+            if (sendTimes != null)
+            {
+                int index = sequenceNumber & WINDOW_MASK;
+                long ticks = Volatile.Read(ref sendTimes[index]);
+                if (ticks != 0 && Volatile.Read(ref _seqnums[index]) == sequenceNumber)
+                {
+                    sendTimeTicks = ticks;
+                    return true;
+                }
+            }
+
+            sendTimeTicks = 0;
+            return false;
         }
 
         /// <summary>
@@ -88,7 +116,11 @@ namespace SIPSorcery.Net
         /// </summary>
         public void Reset()
         {
-            Array.Clear(_sendTimes);
+            var sendTimes = Volatile.Read(ref _sendTimes);
+            if (sendTimes != null)
+            {
+                Array.Clear(sendTimes);
+            }
             Volatile.Write(ref _count, 0);
         }
 

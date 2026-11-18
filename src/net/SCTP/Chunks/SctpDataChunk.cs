@@ -104,6 +104,12 @@ namespace SIPSorcery.Net
         internal Timestamp LastSentAt;
         internal int SendCount;
 
+        /// <summary>
+        /// Set by the data sender when a retransmission timeout has marked this chunk to be sent again
+        /// and it has not been resent yet. While set the chunk does not count as in flight.
+        /// </summary>
+        internal bool RetransmitPending;
+
         public SctpDataChunk()
             : base(SctpChunkType.DATA)
         { }

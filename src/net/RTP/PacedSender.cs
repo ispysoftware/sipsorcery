@@ -118,6 +118,12 @@ namespace SIPSorcery.net.RTP
         public bool IsEnabled => Volatile.Read(ref _paceBytesPerSecond) > 0;
 
         /// <summary>
+        /// The media target rate last supplied to <see cref="SetTargetBitrate"/>, in bytes per second.
+        /// Zero when pacing is off.
+        /// </summary>
+        public double TargetBytesPerSecond => Volatile.Read(ref _paceBytesPerSecond) / PACING_FACTOR;
+
+        /// <summary>
         /// Approximate wall-clock delay the current queue represents at the
         /// configured pacing rate. The application can use this as a send-backlog
         /// signal to skip encoding frames while the link is congested.
