@@ -15,8 +15,8 @@ namespace SIPSorcery.Net
     {
         const int SPS = 7;
         const int PPS = 8;
-        const int IDR_SLICE = 1;
-        const int NON_IDR_SLICE = 5;
+        const int NON_IDR_SLICE = 1;
+        const int IDR_SLICE = 5;
 
         //Payload Helper Fields
         uint previous_timestamp = 0;
@@ -243,18 +243,21 @@ namespace SIPSorcery.Net
             return nal_units;
         }
 
+        // A frame is a keyframe if it carries an IDR slice. SPS/PPS alone mark one only until a
+        // slice says otherwise. (The NAL constants were swapped, so real keyframes reported false.)
         protected void CheckKeyFrame(int nal_type, ref bool? isKeyFrame)
         {
-            if (isKeyFrame == null)
+            if (nal_type == IDR_SLICE)
             {
-                isKeyFrame = nal_type == SPS || nal_type == PPS ? new bool?(true) :
-                    (nal_type == NON_IDR_SLICE ? new bool?(false) : null);
+                isKeyFrame = true;
             }
-            else
+            else if (nal_type == NON_IDR_SLICE)
             {
-                isKeyFrame = nal_type == SPS || nal_type == PPS ?
-                    (isKeyFrame.Value ? isKeyFrame : new bool?(false)) :
-                    (nal_type == NON_IDR_SLICE ? new bool?(false) : isKeyFrame);
+                isKeyFrame = false;
+            }
+            else if ((nal_type == SPS || nal_type == PPS) && isKeyFrame == null)
+            {
+                isKeyFrame = true;
             }
         }
     }
