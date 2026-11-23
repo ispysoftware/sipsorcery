@@ -19,6 +19,7 @@
 //-----------------------------------------------------------------------------
 
 using System;
+using System.Linq;
 using System.Net;
 
 namespace SIPSorcery.Net
@@ -166,6 +167,10 @@ namespace SIPSorcery.Net
             priority = GetPriority();
         }
 
+        private static bool IsTransportToken(string token) =>
+            string.Equals(token, "udp", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(token, "tcp", StringComparison.OrdinalIgnoreCase);
+
         public static RTCIceCandidate Parse(string candidateLine)
         {
             if (string.IsNullOrEmpty(candidateLine))
@@ -178,7 +183,17 @@ namespace SIPSorcery.Net
 
                 RTCIceCandidate candidate = new RTCIceCandidate();
 
-                string[] candidateFields = candidateLine.Trim().Split(' ');
+                var fieldList = candidateLine.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
+
+                // Some servers send an empty foundation, e.g. Google's ice-lite media servers for
+                // Nest cameras: "candidate: 1 udp 2113932031 74.125.247.225 19305 typ host". Trimming
+                // that leaves the component first and shifts every field, so put the empty foundation back.
+                if (fieldList.Count > 2 && IsTransportToken(fieldList[1]) && !IsTransportToken(fieldList[2]))
+                {
+                    fieldList.Insert(0, string.Empty);
+                }
+
+                string[] candidateFields = fieldList.ToArray();
 
                 candidate.foundation = candidateFields[0];
 

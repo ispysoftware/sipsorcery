@@ -300,7 +300,9 @@ namespace SIPSorcery.Net
                         _mediaFormatOrder = new List<int>(formatIDs.Length);
                         foreach (string formatID in formatIDs)
                         {
-                            if (Int32.TryParse(formatID, out int orderedID))
+                            // Some answers repeat a payload type ("m=video 9 UDP/TLS/RTP/SAVPF 96 96 96 127"
+                            // from Google's Nest media servers); keep each ID once.
+                            if (Int32.TryParse(formatID, out int orderedID) && !_mediaFormatOrder.Contains(orderedID))
                             {
                                 _mediaFormatOrder.Add(orderedID);
                             }
@@ -311,7 +313,10 @@ namespace SIPSorcery.Net
                     {
                         if (Media == SDPMediaTypesEnum.application)
                         {
-                            ApplicationMediaFormats.Add(formatID, new SDPApplicationMediaFormat(formatID));
+                            if (!ApplicationMediaFormats.ContainsKey(formatID))
+                            {
+                                ApplicationMediaFormats.Add(formatID, new SDPApplicationMediaFormat(formatID));
+                            }
                         }
                         else if (Media == SDPMediaTypesEnum.message)
                         {
